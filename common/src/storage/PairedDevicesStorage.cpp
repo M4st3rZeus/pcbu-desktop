@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 
 #include "AppSettings.h"
+#include "shell/Elevator.h"
 #include "shell/Shell.h"
 #include "utils/StringUtils.h"
 
@@ -100,6 +101,16 @@ std::vector<PairedDevice> PairedDevicesStorage::GetDevices() {
 }
 
 void PairedDevicesStorage::SaveDevices(const std::vector<PairedDevice> &devices) {
+  // Persisting a paired device always needs root: the store lives in
+  // /etc/pc-bio-unlock and is chmod 600 root-owned so only pcbu_auth can read
+  // it at the login screen.
+  //
+  // Scoped here rather than at each caller because pairing completes on the
+  // PairingServer's client thread, not in a UI handler - the phone showed the
+  // pairing as successful while the PC silently discarded it, because the
+  // thread was outside any ElevationScope. ElevationScope is thread_local, so
+  // it has to be entered on the thread that actually writes.
+  ElevationScope elevation{};
   try {
     nlohmann::json devicesJson{};
     for(auto device : devices) {
@@ -155,9 +166,12 @@ void PairedDevicesStorage::ProtectFile(const std::string &filePath, bool protect
   }
 #elif defined(APPLE) || defined(LINUX)
   if(protect) {
-    auto cmd = Shell::RunCommand(fmt::format(R"(chown {0} "{1}" && chmod 600 "{1}")", CHOWN_USER, filePath));
+    // Single-quoted: double quotes still expand $ and backticks.
+    auto quoted = std::string("'") + filePath + "'";
+    auto cmd = Shell::RunCommand(fmt::format("chown {0} {1} && chmod 600 {1}", CHOWN_USER, quoted));
     if(cmd.exitCode != 0)
-      throw std::runtime_error(fmt::format("Error setting file permissions. (Code={})", cmd.exitCode));
+      throw std::runtime_error(
+          fmt::format("Error setting file permissions. (Code={}, Output={})", cmd.exitCode, cmd.output));
   }
 #endif
 }
