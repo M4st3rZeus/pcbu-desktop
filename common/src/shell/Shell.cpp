@@ -193,7 +193,7 @@ std::vector<uint8_t> Shell::ReadBytes(const std::filesystem::path &path) {
   return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 
-bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint8_t> &data) {
+bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint8_t> &data) try {
   {
     std::ofstream file(path, std::ios::out | std::ios::binary);
     file.write(reinterpret_cast<const char *>(data.data()), (std::streamsize)data.size());
@@ -234,4 +234,9 @@ bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint
   if(!moved)
     spdlog::error("Failed to write '{}' even with elevation.", path.string());
   return moved;
+} catch(const std::exception &ex) {
+  // Called from a Qt worker thread during install; an escaping exception
+  // would terminate the app instead of failing the operation.
+  spdlog::error("Failed to write '{}': {}", path.string(), ex.what());
+  return false;
 }

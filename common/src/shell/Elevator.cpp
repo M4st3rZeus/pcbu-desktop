@@ -1,7 +1,9 @@
 #include "Elevator.h"
 
+#include <chrono>
 #include <spdlog/spdlog.h>
 #include <sstream>
+#include <thread>
 
 #include <boost/asio.hpp>
 #include <boost/process/v2/process.hpp>
@@ -126,7 +128,13 @@ Elevator::~Elevator() {
 }
 
 bool Elevator::IsElevated() const {
-  return m_Impl->ready && m_Impl->proc && m_Impl->proc->running();
+  if(!m_Impl->ready || !m_Impl->proc)
+    return false;
+  // running() throws without an error_code, and the process is legitimately
+  // gone when the user cancels the prompt - which made the throwing overload
+  // reachable on the normal cancel path.
+  boost::system::error_code ec;
+  return m_Impl->proc->running(ec) && !ec;
 }
 
 bool Elevator::Elevate() {
@@ -190,7 +198,7 @@ bool Elevator::Elevate() {
   }
 }
 
-ShellCmdResult Elevator::Run(const std::string &command) {
+ShellCmdResult Elevator::Run(const std::string &command) try {
   // Root already: run directly rather than round-tripping through a helper.
   // Calls RunUserCommand, not RunCommand: the latter now delegates here when
   // unprivileged, and going through it would be a recursive call guarded only
@@ -234,19 +242,41 @@ ShellCmdResult Elevator::Run(const std::string &command) {
   }
   result.output = output.str();
   return result;
+} catch(const std::exception &ex) {
+  // Nothing here may escape: Run() is called from a Qt worker thread, and an
+  // exception crossing that boundary terminates the process rather than
+  // surfacing as a failed install.
+  spdlog::error("Elevator: unexpected error running command. ({})", ex.what());
+  Shutdown();
+  return {-1, ex.what()};
 }
 
-void Elevator::Shutdown() {
-  if(m_Impl->proc && m_Impl->proc->running()) {
+void Elevator::Shutdown() try {
+  boost::system::error_code ec;
+  if(m_Impl->proc && m_Impl->proc->running(ec) && !ec) {
     m_Impl->WriteLine("QUIT");
-    boost::system::error_code ec;
-    m_Impl->in->close(ec);
+    if(m_Impl->in)
+      m_Impl->in->close(ec);
     // The helper exits on stdin close; give it a moment before forcing.
-    for(int i = 0; i < 20 && m_Impl->proc->running(); i++)
+    for(int i = 0; i < 20; i++) {
+      boost::system::error_code pollEc;
+      if(!m_Impl->proc->running(pollEc) || pollEc)
+        break;
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    if(m_Impl->proc->running())
-      m_Impl->proc->terminate(ec);
+    }
+    boost::system::error_code killEc;
+    if(m_Impl->proc->running(killEc) && !killEc)
+      m_Impl->proc->terminate(killEc);
   }
+  m_Impl->proc.reset();
+  m_Impl->in.reset();
+  m_Impl->out.reset();
+  m_Impl->readBuffer.clear();
+  m_Impl->ready = false;
+} catch(const std::exception &ex) {
+  // Shutdown runs from destructors and error paths; a throw here would be
+  // fatal. Reset what we can and carry on.
+  spdlog::warn("Elevator: error during shutdown. ({})", ex.what());
   m_Impl->proc.reset();
   m_Impl->in.reset();
   m_Impl->out.reset();
