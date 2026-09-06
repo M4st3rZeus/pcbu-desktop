@@ -32,6 +32,5 @@
 	<string>${MACOSX_BUNDLE_COPYRIGHT}</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Required for pairing with phones using bluetooth.</string>
-    <true/>
 </dict>
 </plist>
