@@ -2,6 +2,8 @@
 
 #include "shell/Elevator.h"
 
+#include <openssl/rand.h>
+
 #include <boost/filesystem.hpp>
 #ifdef WINDOWS
 #include <boost/process/v1.hpp>
@@ -128,6 +130,44 @@ void Shell::SpawnCommand(const std::string &cmd) {
 
 namespace {
 
+// Single-quotes a path for safe use in a shell command.
+//
+// Paths reach the shell through the elevation wrapper, and a single stray
+// metacharacter turns a file copy into arbitrary code. Wrapping in single
+// quotes disables every expansion; the only character that needs care is a
+// literal quote, closed and re-opened around an escaped one.
+std::string ShellQuote(const std::string &s) {
+  std::string out = "'";
+  for(auto c : s) {
+    if(c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += "'";
+  return out;
+}
+
+// Hex name for a staging file. Deliberately not StringUtils::RandomString:
+// that charset contains ;, |, $, <, > and friends, so an interpolated
+// filename could break - or hijack - the command it lands in.
+std::string RandomHexName(size_t bytes) {
+  std::vector<uint8_t> buf(bytes);
+  // CSPRNG, not rand(): the staging file briefly holds content destined for a
+  // root-owned path, and a predictable name in a world-writable /tmp invites
+  // a symlink race.
+  if(RAND_bytes(buf.data(), static_cast<int>(bytes)) != 1)
+    return {};
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string out{};
+  out.reserve(bytes * 2);
+  for(auto b : buf) {
+    out += digits[(b >> 4) & 0xF];
+    out += digits[b & 0xF];
+  }
+  return out;
+}
+
 // Retries a failed filesystem operation through the privileged helper.
 //
 // Only permission failures are worth escalating: a missing parent or an
@@ -156,7 +196,7 @@ bool Shell::CreateDir(const std::filesystem::path &path) {
   // Permission denied and we are not root: retry through the privileged
   // helper, which prompts once per session. Everything under
   // /etc/pc-bio-unlock and the PAM/credential-provider paths lands here.
-  return ElevatedFallback(ec, fmt::format(R"(mkdir -p "{}")", path.string()));
+  return ElevatedFallback(ec, fmt::format("mkdir -p {}", ShellQuote(path.string())));
 }
 
 bool Shell::RemoveDir(const std::filesystem::path &path) {
@@ -164,7 +204,7 @@ bool Shell::RemoveDir(const std::filesystem::path &path) {
   boost::filesystem::remove(boost::filesystem::path(path), ec);
   if(!ec.failed())
     return true;
-  return ElevatedFallback(ec, fmt::format(R"(rm -R "{}")", path.string()));
+  return ElevatedFallback(ec, fmt::format("rm -R {}", ShellQuote(path.string())));
 }
 
 bool Shell::CreateFile(const std::filesystem::path &path) {
@@ -172,7 +212,7 @@ bool Shell::CreateFile(const std::filesystem::path &path) {
   if(file.is_open())
     return true;
   boost::system::error_code ec{boost::system::errc::permission_denied, boost::system::generic_category()};
-  return ElevatedFallback(ec, fmt::format(R"(touch "{}")", path.string()));
+  return ElevatedFallback(ec, fmt::format("touch {}", ShellQuote(path.string())));
 }
 
 bool Shell::RemoveFile(const std::filesystem::path &path) {
@@ -180,7 +220,7 @@ bool Shell::RemoveFile(const std::filesystem::path &path) {
   boost::filesystem::remove(boost::filesystem::path(path), ec);
   if(!ec.failed())
     return true;
-  return ElevatedFallback(ec, fmt::format(R"(rm -f "{}")", path.string()));
+  return ElevatedFallback(ec, fmt::format("rm -f {}", ShellQuote(path.string())));
 }
 
 std::vector<uint8_t> Shell::ReadBytes(const std::filesystem::path &path) {
@@ -211,7 +251,7 @@ bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint
   // The staged copy is removed even on failure - it may hold the encrypted
   // password blob.
   auto temp = std::filesystem::temp_directory_path() /
-              fmt::format("pcbu_stage_{}", StringUtils::RandomString(16));
+              fmt::format("pcbu_stage_{}", RandomHexName(8));
   {
     std::ofstream tmpFile(temp, std::ios::out | std::ios::binary);
     if(!tmpFile)
@@ -225,14 +265,16 @@ bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint
     }
   }
 
-  auto moved = GetElevator()
-                   .Run(fmt::format(R"(mkdir -p "{}" && mv -f "{}" "{}")",
-                                    path.parent_path().string(), temp.string(), path.string()))
-                   .exitCode == 0;
+  auto result = GetElevator().Run(fmt::format("mkdir -p {} && mv -f {} {}",
+                                               ShellQuote(path.parent_path().string()),
+                                               ShellQuote(temp.string()),
+                                               ShellQuote(path.string())));
+  auto moved = result.exitCode == 0;
   std::error_code rmEc{};
   std::filesystem::remove(temp, rmEc);
   if(!moved)
-    spdlog::error("Failed to write '{}' even with elevation.", path.string());
+    spdlog::error("Failed to write '{}' even with elevation. (Code={}, Output={})", path.string(), result.exitCode,
+                  result.output);
   return moved;
 } catch(const std::exception &ex) {
   // Called from a Qt worker thread during install; an escaping exception
