@@ -18,6 +18,13 @@ constexpr uint16_t PACKET_ID_DEVICE_ID = 0xB0;
 constexpr uint16_t PACKET_ID_UNLOCK_REQUEST = 0xB1;
 constexpr uint16_t PACKET_ID_UNLOCK_RESPONSE = 0xB2;
 
+// Lock is phone-initiated, the mirror image of unlock. The phone asks, the PC
+// replies once it has acted. Appended, never inserted, so existing IDs keep
+// their meaning on already-paired devices.
+constexpr uint16_t PACKET_ID_LOCK_CHALLENGE = 0xB3;
+constexpr uint16_t PACKET_ID_LOCK_REQUEST = 0xB4;
+constexpr uint16_t PACKET_ID_LOCK_RESPONSE = 0xB5;
+
 struct PacketPairInit { // From phone
   std::string protoVersion{};
   std::string deviceUUID{};
@@ -132,6 +139,72 @@ struct PacketUnlockResponseData {
     } catch(...) {
     }
     return {};
+  }
+};
+
+// PC -> phone. A fresh nonce the phone must echo inside its lock request.
+//
+// Unlock has the PC speak first, so its token rides along with the request.
+// Lock is phone-initiated, which would leave nothing to bind the request to a
+// single exchange - a captured packet would replay for the whole +/-2min
+// crypto window. So the PC issues a challenge first and the direction of the
+// handshake stays the same as unlock: the PC always owns the nonce.
+struct PacketLockChallenge {
+  std::string lockToken;
+
+  nlohmann::json ToJson() {
+    return {{"lockToken", lockToken}};
+  }
+};
+
+// Phone -> PC, encrypted with the paired device key.
+struct PacketLockRequest {
+  std::string protoVersion;
+  std::string deviceId;
+  std::string encData;
+
+  static std::optional<PacketLockRequest> FromJson(const std::string &jsonStr) {
+    try {
+      auto json = nlohmann::json::parse(jsonStr);
+      auto packet = PacketLockRequest();
+      packet.protoVersion = json["protoVersion"];
+      packet.deviceId = json["deviceId"];
+      packet.encData = json["encData"];
+      return packet;
+    } catch(...) {
+    }
+    return {};
+  }
+};
+
+// The encrypted half. `lockToken` must match the challenge we just issued.
+struct PacketLockRequestData {
+  std::string lockToken;
+  std::string reason;
+
+  static std::optional<PacketLockRequestData> FromJson(const std::string &jsonStr) {
+    try {
+      auto json = nlohmann::json::parse(jsonStr);
+      auto packet = PacketLockRequestData();
+      packet.lockToken = json["lockToken"];
+      try {
+        packet.reason = json["reason"];
+      } catch(...) {
+      }
+      return packet;
+    } catch(...) {
+    }
+    return {};
+  }
+};
+
+// PC -> phone, once the lock has been attempted.
+struct PacketLockResponse {
+  std::string error;
+  bool locked{};
+
+  nlohmann::json ToJson() {
+    return {{"error", error}, {"locked", locked}};
   }
 };
 

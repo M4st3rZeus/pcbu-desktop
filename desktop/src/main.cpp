@@ -1,7 +1,10 @@
 #include <QGuiApplication>
 #include <QIcon>
 #include <QQmlApplicationEngine>
+#include <spdlog/spdlog.h>
 
+#include "connection/lock/LockServer.h"
+#include "platform/SessionLocker.h"
 #include "storage/LoggingSystem.h"
 
 int main(int argc, char *argv[]) {
@@ -14,6 +17,22 @@ int main(int argc, char *argv[]) {
 
   QGuiApplication app(argc, argv);
   QGuiApplication::setWindowIcon(QIcon(":/res/icons/icon.png"));
+
+  // The lock listener has to live inside the user's interactive session -
+  // every platform's lock API refuses to act on a session the caller is not
+  // part of. This app is the only component that already runs there, so it
+  // hosts the server for as long as it is open.
+  //
+  // Consequence worth knowing: closing the window stops the listener, so
+  // remote lock only works while the app is running. Making it survive a
+  // closed window needs a tray agent or a per-user autostart entry, which is
+  // a deployment change rather than a code one.
+  LockServer lockServer{};
+  if(SessionLocker::IsAvailable()) {
+    lockServer.Start();
+  } else {
+    spdlog::warn("Remote lock disabled: {}", SessionLocker::UnavailableReason());
+  }
 
   auto url = QUrl("qrc:/ui/MainWindow.qml");
   QQmlApplicationEngine engine{};
@@ -28,6 +47,7 @@ int main(int argc, char *argv[]) {
   engine.load(url);
 
   auto result = QGuiApplication::exec();
+  lockServer.Stop();
   LoggingSystem::Destroy();
   return result;
 }

@@ -30,6 +30,7 @@ if(WIN32)
             src/connection/unlock/servers/BTUnlockServer.cpp
             src/connection/unlock/servers/BLEUnlockServer.Win.cpp
             src/platform/PlatformHelper.Win.cpp
+            src/platform/SessionLocker.Win.cpp
             src/platform/BluetoothHelper.Win.cpp
             src/utils/RegistryUtils.cpp
             src/utils/RegistryUtils.h
@@ -52,6 +53,7 @@ elseif(APPLE)
             src/connection/unlock/servers/BTUnlockServer.Mac.mm
             src/connection/unlock/servers/BLEUnlockServer.Mac.mm
             src/platform/PlatformHelper.Mac.cpp
+            src/platform/SessionLocker.Mac.cpp
             src/platform/BluetoothHelper.Mac.mm
     )
 elseif(UNIX)
@@ -84,6 +86,7 @@ elseif(UNIX)
             src/connection/unlock/servers/BTUnlockServer.cpp
             ${PCBU_BLE_LINUX_SRC}
             src/platform/PlatformHelper.Linux.cpp
+            src/platform/SessionLocker.Linux.cpp
             src/platform/BluetoothHelper.Linux.cpp
     )
 endif()
@@ -99,6 +102,9 @@ add_library(pcbu_common
         src/connection/pairing/UDPPairingBroadcaster.cpp
         src/connection/pairing/UDPPairingBroadcaster.h
         src/connection/pairing/PairingStructs.h
+        src/connection/lock/LockServer.h
+        src/connection/lock/LockServer.cpp
+        src/platform/SessionLocker.h
         src/connection/unlock/BaseUnlockConnection.h
         src/connection/unlock/BaseUnlockConnection.cpp
         src/connection/unlock/UDPUnlockBroadcaster.cpp
