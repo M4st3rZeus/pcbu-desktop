@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <csignal>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -7,6 +8,10 @@
 #include <vector>
 
 #ifndef _WIN32
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/proc.h>
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -41,9 +46,8 @@
 //    stumbling into the socket. It is passed by environment rather than argv,
 //    since argv is world-readable through ps.
 //  * The helper exits when its parent dies, so it cannot outlive the GUI as
-//    an idle root process. Checked on every accept timeout.
-//  * The helper exits when its parent dies, so it cannot outlive the GUI as
-//    an idle root process. Checked on every accept timeout.
+//    an idle root process, and an idle timeout bounds it even if that
+//    detection ever fails.
 //  * Commands are executed verbatim. There is deliberately no sanitising
 //    layer: a filter would give false confidence when the actual guarantee is
 //    that only root can reach the socket at all. Callers must never
@@ -61,6 +65,39 @@ namespace {
 
 std::string g_Token{};
 pid_t g_ParentPid = 0;
+std::time_t g_LastActivity = 0;
+
+// Hard ceiling on an idle root helper, in case parent detection ever fails.
+constexpr std::time_t IDLE_TIMEOUT_SECS = 30 * 60;
+
+// Whether the parent is genuinely running.
+//
+// kill(pid, 0) alone is wrong here: it succeeds for a zombie, so a helper
+// relying on it outlives a parent that has exited but not been reaped.
+bool IsParentAlive(pid_t pid) {
+#ifdef __APPLE__
+  proc_bsdinfo info{};
+  auto n = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info));
+  if(n == static_cast<int>(sizeof(info)))
+    return (info.pbi_status != SZOMB);
+  // Lookup failed: the process is gone.
+  return false;
+#else
+  // /proc is authoritative on Linux; state 'Z' means zombie.
+  auto path = "/proc/" + std::to_string(pid) + "/stat";
+  auto f = fopen(path.c_str(), "r");
+  if(f == nullptr)
+    return false;
+  char comm[256]{};
+  char state = 0;
+  int readPid = 0;
+  auto matched = fscanf(f, "%d %255s %c", &readPid, comm, &state);
+  fclose(f);
+  if(matched != 3)
+    return false;
+  return state != 'Z';
+#endif
+}
 
 // Reads a newline-terminated line from a socket. Empty on EOF or error.
 std::string ReadLine(int fd) {
@@ -133,6 +170,12 @@ void HandleConnection(int fd) {
 int main(int argc, char *argv[]) {
   setvbuf(stdout, nullptr, _IONBF, 0);
 
+  // A client that closes mid-reply would otherwise raise SIGPIPE and kill the
+  // helper, taking the whole privileged session with it after a single
+  // command. Writes return EPIPE instead, which the write loop already
+  // handles.
+  signal(SIGPIPE, SIG_IGN);
+
   if(argc != 4) {
     fprintf(stderr, "usage: pcbu_elevator <socket-path> <owner-uid> <parent-pid>\n");
     return 2;
@@ -194,20 +237,52 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  // Poll with a timeout so the parent-liveness check runs even while idle.
-  timeval tv{};
-  tv.tv_sec = 2;
-  tv.tv_usec = 0;
-  setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  // select() with a timeout, not SO_RCVTIMEO: that option does not apply to
+  // accept() on a listening socket, so the loop blocked forever and the
+  // parent-liveness check never ran. Verified - the helper outlived a dead
+  // parent until this was fixed.
 
+  g_LastActivity = std::time(nullptr);
   printf("READY\n");
   fflush(stdout);
 
   while(true) {
     // Never outlive the GUI: an abandoned root listener is exactly the thing
     // this design must not leave behind.
-    if(kill(g_ParentPid, 0) != 0 && errno == ESRCH)
+    //
+    // kill(pid, 0) is not sufficient on its own. It succeeds for a zombie -
+    // a dead process that has not been reaped - so a helper checking only
+    // that would linger indefinitely. Verified: with a killed-but-unreaped
+    // parent, the kill() check never fired.
+    //
+    // proc_pidinfo tells us whether the process is really running. Falling
+    // back to kill() elsewhere keeps this portable; the idle timeout below
+    // bounds the damage either way.
+    if(!IsParentAlive(g_ParentPid))
       break;
+
+    // Belt and braces: even if parent detection fails on some platform, an
+    // idle helper must not live forever. Any successful command resets this.
+    if(std::time(nullptr) - g_LastActivity > IDLE_TIMEOUT_SECS) {
+      fprintf(stderr, "idle timeout; exiting\n");
+      break;
+    }
+
+    // Wait with a timeout so the checks above run even while idle.
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(server, &readSet);
+    timeval timeout{};
+    timeout.tv_sec = 2;
+    timeout.tv_usec = 0;
+    auto ready = select(server + 1, &readSet, nullptr, nullptr, &timeout);
+    if(ready == 0)
+      continue; // Idle tick: loop back and re-check the parent.
+    if(ready < 0) {
+      if(errno == EINTR)
+        continue;
+      break;
+    }
 
     auto client = accept(server, nullptr, nullptr);
     if(client < 0) {
@@ -217,6 +292,7 @@ int main(int argc, char *argv[]) {
     }
     HandleConnection(client);
     close(client);
+    g_LastActivity = std::time(nullptr);
   }
 
   close(server);

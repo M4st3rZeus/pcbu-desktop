@@ -13,10 +13,21 @@
 
 #include "utils/StringUtils.h"
 
+#include <filesystem>
+#include <mutex>
+#include <openssl/rand.h>
+#include <optional>
+
 #ifdef WINDOWS
 #include <Windows.h>
 #else
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
+#endif
+
+#ifdef APPLE
+#include <mach-o/dyld.h>
 #endif
 
 // Runs privileged commands without making the whole GUI root.
@@ -119,28 +130,208 @@ ShellCmdResult RunElevatedOnce(const std::string &command) {
 #endif
 }
 
+#ifndef WINDOWS
+
+// Random hex, for the socket name and the auth token. CSPRNG rather than
+// rand(): the token is what stops another process on this account from
+// driving a root helper.
+std::string RandomHex(size_t bytes) {
+  std::vector<uint8_t> buf(bytes);
+  if(RAND_bytes(buf.data(), static_cast<int>(bytes)) != 1)
+    return {};
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string out{};
+  out.reserve(bytes * 2);
+  for(auto b : buf) {
+    out += digits[(b >> 4) & 0xF];
+    out += digits[b & 0xF];
+  }
+  return out;
+}
+
+// Single-quotes a value for safe interpolation into a shell command.
+std::string Quote(const std::string &s) {
+  std::string out = "'";
+  for(auto c : s) {
+    if(c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += "'";
+  return out;
+}
+
+// Locates the helper binary next to the running executable.
+std::filesystem::path FindHelper() {
+  std::error_code ec;
+#ifdef APPLE
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::string buf(size, '\0');
+  if(_NSGetExecutablePath(buf.data(), &size) != 0)
+    return {};
+  auto self = std::filesystem::canonical(std::filesystem::path(buf.c_str()), ec);
+  if(ec)
+    self = std::filesystem::path(buf.c_str());
+#else
+  auto self = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if(ec)
+    return {};
+#endif
+  auto dir = self.parent_path();
+  for(const auto &candidate : {dir / "pcbu_elevator", dir / "elevator" / "pcbu_elevator"}) {
+    if(std::filesystem::exists(candidate))
+      return candidate;
+  }
+  return {};
+}
+
+// One request over the helper's socket. Empty result means the channel is
+// unusable and the caller should fall back to a fresh prompt.
+std::optional<ShellCmdResult> RunOverSocket(const std::string &socketPath, const std::string &token,
+                                            const std::string &command) {
+  auto fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  if(fd < 0)
+    return std::nullopt;
+
+  sockaddr_un addr{};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, socketPath.c_str(), sizeof(addr.sun_path) - 1);
+  if(::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+    ::close(fd);
+    return std::nullopt;
+  }
+
+  auto send = [fd](const std::string &line) {
+    auto payload = line + "\n";
+    auto remaining = payload.size();
+    auto p = payload.c_str();
+    while(remaining > 0) {
+      auto n = ::write(fd, p, remaining);
+      if(n <= 0)
+        return false;
+      p += n;
+      remaining -= static_cast<size_t>(n);
+    }
+    return true;
+  };
+
+  if(!send(token) || !send("RUN " + command)) {
+    ::close(fd);
+    return std::nullopt;
+  }
+
+  std::string buffer{};
+  char chunk[4096];
+  for(;;) {
+    auto n = ::read(fd, chunk, sizeof(chunk));
+    if(n <= 0)
+      break;
+    buffer.append(chunk, static_cast<size_t>(n));
+  }
+  ::close(fd);
+
+  ShellCmdResult result{-1, {}};
+  std::ostringstream output{};
+  size_t pos = 0;
+  while(pos < buffer.size()) {
+    auto nl = buffer.find('\n', pos);
+    auto line = buffer.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+    pos = (nl == std::string::npos) ? buffer.size() : nl + 1;
+    if(line.rfind("OUT ", 0) == 0)
+      output << line.substr(4) << "\n";
+    else if(line.rfind("EXIT ", 0) == 0)
+      result.exitCode = std::atoi(line.c_str() + 5);
+  }
+  result.output = output.str();
+  while(!result.output.empty() && result.output.back() == '\n')
+    result.output.pop_back();
+  return result;
+}
+
+#endif // !WINDOWS
+
 } // namespace
 
 struct Elevator::Impl {
-  // No persistent state: elevation happens per command. Kept so the pimpl
-  // and the public header stay stable.
-  bool unused{};
+  // Set once the root helper is listening. Guarded because Run() is called
+  // from the UI thread and from PairingServer's client thread.
+  std::mutex mutex{};
+  std::string socketPath{};
+  std::string token{};
+  bool helperRunning{};
 };
 
 Elevator::Elevator() : m_Impl(std::make_unique<Impl>()) {}
 
-Elevator::~Elevator() = default;
-
-bool Elevator::IsElevated() const {
-  // There is no long-lived privileged session to be inside; each command
-  // elevates on its own.
-  return Shell::IsRunningAsAdmin();
+Elevator::~Elevator() {
+  Shutdown();
 }
 
+bool Elevator::IsElevated() const {
+  if(Shell::IsRunningAsAdmin())
+    return true;
+  std::lock_guard lock(m_Impl->mutex);
+  return m_Impl->helperRunning;
+}
+
+// Starts the privileged helper, prompting once.
+//
+// This is the whole point of the socket design: one authentication, then
+// every later privileged operation reuses the channel without a prompt.
 bool Elevator::Elevate() {
-  // Nothing to pre-establish. Reports whether elevation is possible here, so
-  // a caller can bail before starting a long operation.
-  return Shell::IsRunningAsAdmin() || ElevationScope::IsAllowed();
+  if(Shell::IsRunningAsAdmin())
+    return true;
+
+#ifdef WINDOWS
+  spdlog::error("Elevator: persistent elevation is not implemented on Windows yet.");
+  return false;
+#else
+  std::lock_guard lock(m_Impl->mutex);
+  if(m_Impl->helperRunning)
+    return true;
+
+  auto helper = FindHelper();
+  if(helper.empty()) {
+    spdlog::error("Elevator: helper binary not found next to the executable.");
+    return false;
+  }
+
+  auto token = RandomHex(24);
+  auto socketPath = fmt::format("/tmp/pcbu-{}/{}.sock", getuid(), RandomHex(8));
+  if(token.empty() || socketPath.size() >= 100) {
+    spdlog::error("Elevator: could not prepare the helper channel.");
+    return false;
+  }
+
+  // Detached with nohup so it survives the elevation wrapper exiting, which
+  // is what makes one prompt cover the whole session. The token goes through
+  // the environment rather than argv, since argv is world-readable via ps.
+  auto launch = fmt::format("mkdir -p {} && PCBU_ELEVATOR_TOKEN={} nohup {} {} {} {} >/dev/null 2>&1 &",
+                            Quote(std::filesystem::path(socketPath).parent_path().string()), Quote(token),
+                            Quote(helper.string()), Quote(socketPath), getuid(), getpid());
+
+  auto result = RunElevatedOnce(launch);
+  if(result.exitCode != 0) {
+    spdlog::warn("Elevator: helper launch was cancelled or failed. (Code={})", result.exitCode);
+    return false;
+  }
+
+  // Wait for the socket to appear; the helper binds it right after starting.
+  for(int i = 0; i < 50; i++) {
+    if(std::filesystem::exists(socketPath)) {
+      m_Impl->socketPath = socketPath;
+      m_Impl->token = token;
+      m_Impl->helperRunning = true;
+      spdlog::info("Elevator: privileged helper ready; no further prompts this session.");
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  spdlog::error("Elevator: helper did not create its socket.");
+  return false;
+#endif
 }
 
 ShellCmdResult Elevator::Run(const std::string &command) try {
@@ -153,6 +344,33 @@ ShellCmdResult Elevator::Run(const std::string &command) try {
     spdlog::debug("Elevator: refusing to prompt outside a user-initiated action.");
     return {-1, "Elevation not permitted here."};
   }
+
+#ifndef WINDOWS
+  // Reuse the helper when it is up. Start it on first use so the prompt
+  // happens at a moment the user is expecting it.
+  if(!IsElevated())
+    Elevate();
+
+  std::string socketPath{};
+  std::string token{};
+  {
+    std::lock_guard lock(m_Impl->mutex);
+    socketPath = m_Impl->socketPath;
+    token = m_Impl->token;
+  }
+  if(!socketPath.empty()) {
+    if(auto result = RunOverSocket(socketPath, token, command); result.has_value())
+      return result.value();
+    // Helper is gone: drop it and fall through to a one-shot prompt rather
+    // than failing the operation outright.
+    spdlog::warn("Elevator: helper channel is dead; falling back to a prompt.");
+    std::lock_guard lock(m_Impl->mutex);
+    m_Impl->helperRunning = false;
+    m_Impl->socketPath.clear();
+    m_Impl->token.clear();
+  }
+#endif
+
   return RunElevatedOnce(command);
 } catch(const std::exception &ex) {
   // Nothing may escape: Run() is called from a Qt worker thread, and an
@@ -163,7 +381,18 @@ ShellCmdResult Elevator::Run(const std::string &command) try {
 }
 
 void Elevator::Shutdown() {
-  // No persistent helper to tear down.
+#ifndef WINDOWS
+  std::lock_guard lock(m_Impl->mutex);
+  if(!m_Impl->helperRunning)
+    return;
+  // The helper also exits on its own when this process dies; this just makes
+  // teardown immediate on a clean quit.
+  std::error_code ec{};
+  std::filesystem::remove(m_Impl->socketPath, ec);
+  m_Impl->helperRunning = false;
+  m_Impl->socketPath.clear();
+  m_Impl->token.clear();
+#endif
 }
 
 Elevator &GetElevator() {
