@@ -22,11 +22,13 @@ if(WIN32)
             Bthprops
             ole32
             Shell32
+            RuntimeObject
+            WindowsApp
     )
     set(PLATFORM_SRC
             src/connection/unlock/clients/BTUnlockClient.cpp
             src/connection/unlock/servers/BTUnlockServer.cpp
-            src/connection/unlock/servers/BLEUnlockServer.Stub.cpp
+            src/connection/unlock/servers/BLEUnlockServer.Win.cpp
             src/platform/PlatformHelper.Win.cpp
             src/platform/BluetoothHelper.Win.cpp
             src/utils/RegistryUtils.cpp
@@ -56,15 +58,31 @@ elseif(UNIX)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(libxcrypt IMPORTED_TARGET REQUIRED libxcrypt)
 
+    # BlueZ exposes no C API for hosting a GATT service; the only supported
+    # route is its D-Bus interface. libdbus-1 is present on every systemd
+    # system, but keep BLE optional so a build without it still succeeds with
+    # the stub backend.
+    pkg_check_modules(dbus1 IMPORTED_TARGET dbus-1)
+    if(dbus1_FOUND)
+        set(PCBU_BLE_LINUX_SRC src/connection/unlock/servers/BLEUnlockServer.Linux.cpp)
+        set(PCBU_BLE_LINUX_LIBS PkgConfig::dbus1)
+        message(STATUS "BLE unlock enabled (libdbus-1 found).")
+    else()
+        set(PCBU_BLE_LINUX_SRC src/connection/unlock/servers/BLEUnlockServer.Stub.cpp)
+        set(PCBU_BLE_LINUX_LIBS "")
+        message(WARNING "libdbus-1 not found; BLE unlock will be unavailable.")
+    endif()
+
     add_compile_definitions(LINUX HAVE_CRYPT_H)
     set(PLATFORM_LIBS
             PkgConfig::libxcrypt
             bluetooth
+            ${PCBU_BLE_LINUX_LIBS}
     )
     set(PLATFORM_SRC
             src/connection/unlock/clients/BTUnlockClient.cpp
             src/connection/unlock/servers/BTUnlockServer.cpp
-            src/connection/unlock/servers/BLEUnlockServer.Stub.cpp
+            ${PCBU_BLE_LINUX_SRC}
             src/platform/PlatformHelper.Linux.cpp
             src/platform/BluetoothHelper.Linux.cpp
     )
