@@ -39,6 +39,13 @@ bool BLEUnlockServer::Start() {
   m_Peripheral->OnCentralConnected = [this]() {
     spdlog::info("BLE central connected.");
     m_HasConnection = true;
+    // A re-subscribe must not start a second exchange: the phone would be
+    // asked to approve the same unlock twice, which is the bug the TCP
+    // server had.
+    if(m_SentRequest) {
+      spdlog::info("BLE: request already sent; ignoring re-subscribe.");
+      return;
+    }
     // The phone cannot announce its device id before we know it is there, so
     // the request goes out as soon as it subscribes.
     if(!SendUnlockRequestBLE())

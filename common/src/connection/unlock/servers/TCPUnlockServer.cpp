@@ -132,7 +132,32 @@ void TCPUnlockServer::ClientThread(SOCKET clientSocket) {
   if(setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char *>(&opt), sizeof(opt))) {
     spdlog::error("setsockopt(TCP_NODELAY) failed. (Code={})", SOCKET_LAST_ERROR);
   }
+
+  // Claim the single auth slot. A phone commonly opens more than one
+  // connection - the UDP beacon repeats every 2s, and a client may dial again
+  // before the first attempt finishes - and running the flow on each one asks
+  // the user to approve the same unlock twice.
+  //
+  // The loser is dropped rather than queued: by the time it would run, the
+  // winner has either succeeded (nothing left to do) or failed (the handler
+  // is tearing the server down anyway).
+  auto expected = false;
+  if(!m_AuthInProgress.compare_exchange_strong(expected, true)) {
+    spdlog::info("TCP client dropped: an unlock exchange is already in progress.");
+    --m_NumConnections;
+    m_HasConnection = m_NumConnections > 0;
+    SOCKET_CLOSE(clientSocket);
+    return;
+  }
+
   PerformAuthFlow(clientSocket, true);
+
+  // Release only if no verdict was reached, so a retry after a dropped
+  // connection can still be served. Once the state is decided the handler
+  // stops the server, and re-prompting would be wrong.
+  if(m_UnlockState == UnlockState::UNKNOWN)
+    m_AuthInProgress = false;
+
   --m_NumConnections;
   m_HasConnection = m_NumConnections > 0;
   SOCKET_CLOSE(clientSocket);
