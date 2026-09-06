@@ -129,6 +129,8 @@ add_library(pcbu_common
         src/platform/BluetoothHelper.h
         src/shell/Shell.cpp
         src/shell/Shell.h
+        src/shell/Elevator.cpp
+        src/shell/Elevator.h
         src/storage/AppSettings.cpp
         src/storage/AppSettings.h
         src/storage/LoggingSystem.cpp

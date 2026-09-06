@@ -1,0 +1,230 @@
+#include "Elevator.h"
+
+#include <spdlog/spdlog.h>
+#include <sstream>
+
+#include <boost/asio.hpp>
+#include <boost/process/v2/process.hpp>
+#include <boost/process/v2/stdio.hpp>
+
+#include "utils/StringUtils.h"
+
+#ifdef WINDOWS
+#include <Windows.h>
+#else
+#include <unistd.h>
+#endif
+
+namespace {
+
+// Locates the privileged helper next to the running executable.
+std::filesystem::path FindHelper() {
+  std::error_code ec;
+#ifdef WINDOWS
+  wchar_t buf[MAX_PATH]{};
+  if(GetModuleFileNameW(nullptr, buf, MAX_PATH) == 0)
+    return {};
+  auto exeDir = std::filesystem::path(buf).parent_path();
+  auto candidate = exeDir / "pcbu_elevator.exe";
+#else
+  // The app bundle puts both binaries in Contents/MacOS; a plain build puts
+  // the helper in its own subdirectory, so check both.
+  auto self = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if(ec) {
+    // macOS has no /proc. Fall back to the build/bundle layout relative to cwd.
+    self.clear();
+  }
+  auto exeDir = self.empty() ? std::filesystem::current_path() : self.parent_path();
+  auto candidate = exeDir / "pcbu_elevator";
+  if(!std::filesystem::exists(candidate))
+    candidate = exeDir / "elevator" / "pcbu_elevator";
+#endif
+  return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
+}
+
+// Escapes a string for embedding inside an AppleScript double-quoted literal.
+std::string EscapeForAppleScript(const std::string &s) {
+  std::string out;
+  out.reserve(s.size() + 8);
+  for(auto c : s) {
+    if(c == '\\' || c == '"')
+      out += '\\';
+    out += c;
+  }
+  return out;
+}
+
+} // namespace
+
+struct Elevator::Impl {
+  boost::asio::io_context ctx{};
+  std::unique_ptr<boost::process::v2::process> proc{};
+  std::unique_ptr<boost::asio::writable_pipe> in{};
+  std::unique_ptr<boost::asio::readable_pipe> out{};
+  std::string readBuffer{};
+  bool ready{};
+
+  // Reads one framed line from the helper. Empty on EOF.
+  std::string ReadLine() {
+    while(true) {
+      auto pos = readBuffer.find('\n');
+      if(pos != std::string::npos) {
+        auto line = readBuffer.substr(0, pos);
+        readBuffer.erase(0, pos + 1);
+        while(!line.empty() && line.back() == '\r')
+          line.pop_back();
+        return line;
+      }
+      boost::system::error_code ec;
+      char chunk[4096];
+      auto n = out->read_some(boost::asio::buffer(chunk), ec);
+      if(ec || n == 0)
+        return {};
+      readBuffer.append(chunk, n);
+    }
+  }
+
+  bool WriteLine(const std::string &line) {
+    boost::system::error_code ec;
+    auto payload = line + "\n";
+    boost::asio::write(*in, boost::asio::buffer(payload), ec);
+    return !ec;
+  }
+};
+
+Elevator::Elevator() : m_Impl(std::make_unique<Impl>()) {}
+
+Elevator::~Elevator() {
+  Shutdown();
+}
+
+bool Elevator::IsElevated() const {
+  return m_Impl->ready && m_Impl->proc && m_Impl->proc->running();
+}
+
+bool Elevator::Elevate() {
+  if(IsElevated())
+    return true;
+
+  // Already root (packaged service, or launched with sudo): no helper needed.
+  if(Shell::IsRunningAsAdmin()) {
+    spdlog::info("Already running with admin rights; no helper needed.");
+    m_Impl->ready = true;
+    return true;
+  }
+
+  auto helper = FindHelper();
+  if(helper.empty()) {
+    spdlog::error("Elevator: helper binary not found next to the executable.");
+    return false;
+  }
+
+  try {
+    m_Impl->in = std::make_unique<boost::asio::writable_pipe>(m_Impl->ctx);
+    m_Impl->out = std::make_unique<boost::asio::readable_pipe>(m_Impl->ctx);
+
+#ifdef WINDOWS
+    // ShellExecute with the "runas" verb raises the UAC prompt. It gives no
+    // pipes back, so on Windows the helper is launched per batch instead of
+    // held open - see Run().
+    spdlog::warn("Elevator: persistent helper is not implemented on Windows yet.");
+    return false;
+#elif defined(APPLE)
+    // osascript's "with administrator privileges" is the supported route.
+    // AuthorizationExecuteWithPrivileges has been deprecated since 10.7 and
+    // should not be used for new work.
+    auto script = fmt::format(R"(do shell script "{}" with administrator privileges)",
+                              EscapeForAppleScript(helper.string()));
+    m_Impl->proc = std::make_unique<boost::process::v2::process>(
+        m_Impl->ctx, "/usr/bin/osascript", std::vector<std::string>{"-e", script},
+        boost::process::v2::process_stdio{*m_Impl->in, *m_Impl->out, {}});
+#else
+    // pkexec shows the polkit prompt and keeps stdio wired through.
+    m_Impl->proc = std::make_unique<boost::process::v2::process>(
+        m_Impl->ctx, "/usr/bin/pkexec", std::vector<std::string>{helper.string()},
+        boost::process::v2::process_stdio{*m_Impl->in, *m_Impl->out, {}});
+#endif
+
+    // The helper announces itself once it is up and confirmed root. A
+    // cancelled prompt closes the pipe instead, which reads as EOF.
+    auto line = m_Impl->ReadLine();
+    if(line != "READY") {
+      spdlog::warn("Elevator: helper did not become ready. (Got='{}')", line);
+      Shutdown();
+      return false;
+    }
+    m_Impl->ready = true;
+    spdlog::info("Elevator: privileged helper ready.");
+    return true;
+  } catch(const std::exception &ex) {
+    spdlog::error("Elevator: failed to start helper. ({})", ex.what());
+    Shutdown();
+    return false;
+  }
+}
+
+ShellCmdResult Elevator::Run(const std::string &command) {
+  // Root already: run directly rather than round-tripping through a helper.
+  if(Shell::IsRunningAsAdmin())
+    return Shell::RunCommand(command);
+
+  if(!IsElevated() && !Elevate())
+    return {-1, "Not elevated."};
+
+  if(!m_Impl->WriteLine("RUN " + command)) {
+    spdlog::error("Elevator: failed to send command.");
+    Shutdown();
+    return {-1, "Helper pipe closed."};
+  }
+
+  ShellCmdResult result{};
+  std::ostringstream output{};
+  while(true) {
+    auto line = m_Impl->ReadLine();
+    if(line.empty() && !IsElevated()) {
+      // Helper died mid-command.
+      Shutdown();
+      return {-1, output.str()};
+    }
+    if(line == "DONE")
+      break;
+    if(line.rfind("EXIT ", 0) == 0) {
+      result.exitCode = std::atoi(line.substr(5).c_str());
+      continue;
+    }
+    if(line.rfind("OUT ", 0) == 0) {
+      output << line.substr(4) << "\n";
+      continue;
+    }
+    if(line.empty()) {
+      // EOF without DONE.
+      Shutdown();
+      break;
+    }
+  }
+  result.output = output.str();
+  return result;
+}
+
+void Elevator::Shutdown() {
+  if(m_Impl->proc && m_Impl->proc->running()) {
+    m_Impl->WriteLine("QUIT");
+    boost::system::error_code ec;
+    m_Impl->in->close(ec);
+    // The helper exits on stdin close; give it a moment before forcing.
+    for(int i = 0; i < 20 && m_Impl->proc->running(); i++)
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    if(m_Impl->proc->running())
+      m_Impl->proc->terminate(ec);
+  }
+  m_Impl->proc.reset();
+  m_Impl->in.reset();
+  m_Impl->out.reset();
+  m_Impl->readBuffer.clear();
+  m_Impl->ready = false;
+}
+
+Elevator &GetElevator() {
+  static Elevator instance{};
+  return instance;
+}

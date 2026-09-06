@@ -37,9 +37,15 @@ QString MainWindow::GetLicenseText() {
 }
 
 bool MainWindow::PerformStartupChecks(QObject *viewLoader, QObject *window) {
+  // Running unprivileged is no longer fatal. Privileged work (installing the
+  // login component, writing the paired-devices store) goes through the
+  // elevator helper, which prompts once and runs only that work as root.
+  //
+  // Deliberately not relaunching the whole GUI elevated: the lock server has
+  // to live in the user's own interactive session, and every platform's lock
+  // API refuses to act on a session the caller is not part of.
   if(!Shell::IsRunningAsAdmin()) {
-    QMetaObject::invokeMethod(window, "showFatalErrorMessage", Q_ARG(QVariant, QString::fromUtf8(I18n::Get("error_not_admin"))));
-    return false;
+    spdlog::info("Running without admin rights; privileged actions will prompt for elevation.");
   }
 #if defined(LINUX) || defined(APPLE)
   if(Shell::RunUserCommand("which bash").exitCode != 0) {

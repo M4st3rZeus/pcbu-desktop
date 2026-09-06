@@ -96,6 +96,7 @@ FetchContent_MakeAvailable(spdlog)
 
 add_subdirectory(common)
 add_subdirectory(desktop)
+add_subdirectory(desktop/elevator)
 if(WIN32)
     add_subdirectory(natives/win-pcbiounlock)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
