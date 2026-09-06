@@ -74,6 +74,25 @@ std::vector<PairedDevice> PairedDevicesStorage::GetDevices() {
 #ifdef WINDOWS
     ProtectFile(filePath.string(), true);
 #endif
+
+    // A read must never destroy data. The store is chmod 600 root-owned so
+    // only pcbu_auth can read it at the login screen; the desktop app runs
+    // unprivileged and its read legitimately fails. Treating that as
+    // corruption and rewriting an empty array silently deleted real pairings
+    // - the phone paired, unlock worked, and then simply opening the app
+    // wiped the device.
+    //
+    // So only an existing, readable, genuinely unparseable file is repaired.
+    // Anything else is reported and left alone.
+    if(jsonData.empty()) {
+      if(std::filesystem::exists(filePath)) {
+        spdlog::warn("Paired devices store exists but could not be read (permissions?); leaving it untouched.");
+        return result;
+      }
+      // No file yet: creating an empty store is correct here.
+      SaveDevices({});
+      return result;
+    }
     auto json = nlohmann::json::parse(jsonData);
     for(auto entry : json) {
       auto device = PairedDevice();
@@ -93,7 +112,19 @@ std::vector<PairedDevice> PairedDevicesStorage::GetDevices() {
       result.emplace_back(device);
     }
   } catch(const std::exception &ex) {
+    // Reached only when the file had content that would not parse, which is
+    // real corruption. Even then, do not silently discard: the store holds
+    // the encrypted password blob, so keep a copy before replacing it.
     spdlog::error("Failed reading paired devices storage: {}", ex.what());
+    try {
+      auto filePath = AppSettings::GetBaseDir() / DEVICES_FILE_NAME;
+      auto backup = filePath.string() + ".corrupt";
+      std::error_code ec{};
+      std::filesystem::copy_file(filePath, backup, std::filesystem::copy_options::overwrite_existing, ec);
+      if(!ec)
+        spdlog::warn("Kept a copy of the unreadable store at '{}'.", backup);
+    } catch(...) {
+    }
     spdlog::info("Creating new devices storage...");
     SaveDevices({});
   }
