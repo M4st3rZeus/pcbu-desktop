@@ -4,6 +4,7 @@
 #include "platform/BluetoothHelper.h"
 #include "platform/NetworkHelper.h"
 #include "platform/PlatformHelper.h"
+#include "shell/Elevator.h"
 #include "storage/AppSettings.h"
 #include "utils/QRUtils.h"
 #include "utils/StringUtils.h"
@@ -18,6 +19,9 @@ PairingForm::~PairingForm() {
     m_PairingServer->Stop();
   if(m_DiscoveryBeacon)
     m_DiscoveryBeacon->Stop();
+  // Close the window explicitly: it must not outlive the server that needed
+  // it, and relying on member destruction order is easy to break later.
+  m_Elevation.reset();
 }
 
 PairingAssistantModel PairingForm::GetData() {
@@ -95,6 +99,7 @@ void PairingForm::UpdateStepForm(QObject *viewLoader, QObject *window) {
       m_PairingServer->Stop();
     }
     m_PairingServer.reset();
+    m_Elevation.reset();
     if(m_DiscoveryBeacon) {
       m_DiscoveryBeacon->Stop();
       m_DiscoveryBeacon.reset();
@@ -112,6 +117,20 @@ void PairingForm::UpdateStepForm(QObject *viewLoader, QObject *window) {
     uiData.macAddress = NetworkHelper::GetSavedNetworkInterface().macAddress;
     uiData.btAddress = m_PairingData.bluetoothAddress.toStdString();
     uiData.useLegacy = m_PairingData.useLegacyPairing;
+    // Elevation window, opened here rather than when the phone connects:
+    // saving a paired device needs root, but that write happens later on the
+    // PairingServer's client thread. Prompting there would interrupt the user
+    // mid-pairing; prompting now happens while they are already looking at
+    // this screen.
+    //
+    // A session rather than an ElevationScope because the window has to
+    // outlive this thread - ElevationScope is thread_local.
+    if(!Shell::IsRunningAsAdmin()) {
+      m_Elevation = std::make_unique<ElevationSession>("pairing");
+      // Authenticate up front. Touching the store is enough to trigger the
+      // prompt, and doing it now means the later save is silent.
+      GetElevator().Run(fmt::format("mkdir -p '{}'", AppSettings::GetBaseDir().string()));
+    }
     m_PairingServer->Start(uiData);
 
     if(!m_PairingData.useLegacyPairing) {

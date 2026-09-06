@@ -73,8 +73,37 @@ public:
   ElevationScope(const ElevationScope &) = delete;
   ElevationScope &operator=(const ElevationScope &) = delete;
 
-  // Whether the current call stack is inside a user-initiated action.
+  // Whether elevation is permitted here: either this thread is inside a
+  // scope, or a session-wide window is open.
   static bool IsAllowed();
+};
+
+// Opens elevation for every thread until closed.
+//
+// ElevationScope is thread_local, which is right for a self-contained action
+// but wrong when the work crosses threads. Pairing is the case that forced
+// this: the user starts it in the UI, and it completes minutes later on the
+// PairingServer's client thread when the phone finally connects. A
+// thread_local scope opened at the start cannot reach that write.
+//
+// Prefer ElevationScope. Reach for this only when a user-initiated action
+// hands off to another thread, and keep the window as short as the action -
+// it is a standing permission to prompt, so leaving one open indefinitely
+// would let a prompt appear long after the user forgot what they clicked.
+class ElevationSession {
+public:
+  explicit ElevationSession(std::string reason);
+  ~ElevationSession();
+
+  ElevationSession(const ElevationSession &) = delete;
+  ElevationSession &operator=(const ElevationSession &) = delete;
+
+  // Ends the window early. Idempotent.
+  void Close();
+
+private:
+  std::string m_Reason;
+  bool m_Open{};
 };
 
 #endif // PCBU_DESKTOP_ELEVATOR_H

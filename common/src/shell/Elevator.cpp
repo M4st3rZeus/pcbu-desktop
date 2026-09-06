@@ -1,5 +1,6 @@
 #include "Elevator.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <spdlog/spdlog.h>
@@ -173,6 +174,10 @@ Elevator &GetElevator() {
 namespace {
 // Depth rather than a bool so nested scopes behave.
 thread_local int g_ElevationDepth = 0;
+
+// Cross-thread windows. Atomic because pairing opens one on the UI thread and
+// the write happens on a network thread.
+std::atomic<int> g_SessionDepth{0};
 } // namespace
 
 ElevationScope::ElevationScope() {
@@ -185,5 +190,22 @@ ElevationScope::~ElevationScope() {
 }
 
 bool ElevationScope::IsAllowed() {
-  return g_ElevationDepth > 0;
+  return g_ElevationDepth > 0 || g_SessionDepth.load() > 0;
+}
+
+ElevationSession::ElevationSession(std::string reason) : m_Reason(std::move(reason)), m_Open(true) {
+  g_SessionDepth.fetch_add(1);
+  spdlog::info("Elevation window opened: {}", m_Reason);
+}
+
+ElevationSession::~ElevationSession() {
+  Close();
+}
+
+void ElevationSession::Close() {
+  if(!m_Open)
+    return;
+  m_Open = false;
+  g_SessionDepth.fetch_sub(1);
+  spdlog::info("Elevation window closed: {}", m_Reason);
 }
