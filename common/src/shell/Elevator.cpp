@@ -100,14 +100,31 @@ ShellCmdResult RunElevatedOnce(const std::string &command) {
     return {-1, ex.what()};
   }
 
+  // Close our copy of the write end before reading.
+  //
+  // boost hands the same pipe to the child's stdout and stderr, and keeps a
+  // descriptor open on this side too. A backgrounded grandchild inherits it
+  // and holds it for its whole lifetime, so the read below waits on an EOF
+  // that never arrives - which is exactly how Elevate() hung. Reading with a
+  // deadline rather than to EOF makes that unhangable regardless.
   std::string output{};
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
   for(;;) {
+    if(std::chrono::steady_clock::now() > deadline) {
+      spdlog::warn("Elevator: timed out reading elevation output; continuing.");
+      break;
+    }
     boost::system::error_code ec;
     char chunk[4096];
     auto n = out.read_some(boost::asio::buffer(chunk), ec);
     if(ec || n == 0)
       break;
     output.append(chunk, n);
+    // The marker is the last thing the wrapper prints. Stop as soon as it
+    // arrives instead of waiting for a descriptor a detached child may hold
+    // open indefinitely.
+    if(output.find(EXIT_MARKER) != std::string::npos)
+      break;
   }
 
   boost::system::error_code waitEc;
@@ -299,7 +316,10 @@ bool Elevator::Elevate() {
   }
 
   auto token = RandomHex(24);
-  auto socketPath = fmt::format("/tmp/pcbu-{}/{}.sock", getuid(), RandomHex(8));
+  // Per-run directory name, not a fixed one. A leftover /tmp/pcbu-<uid> from
+  // an earlier root-owned run would be reused silently by mkdir -p, leaving
+  // the socket somewhere this process may not be able to reach.
+  auto socketPath = fmt::format("/tmp/pcbu-{}-{}/s.sock", getuid(), RandomHex(6));
   if(token.empty() || socketPath.size() >= 100) {
     spdlog::error("Elevator: could not prepare the helper channel.");
     return false;
