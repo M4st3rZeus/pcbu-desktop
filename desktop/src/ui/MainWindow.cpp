@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "installer/ServiceInstaller.h"
+#include "shell/Elevator.h"
 #include "platform/PlatformHelper.h"
 #include "shell/Shell.h"
 #include "storage/AppSettings.h"
@@ -93,6 +94,9 @@ void MainWindow::OnInstallClicked(QObject *window) {
       spdlog::info(str);
       QMetaObject::invokeMethod(window, "appendLoadingOutput", Q_ARG(QVariant, QString::fromUtf8(str)));
     };
+    // User asked for this, so privileged steps may prompt. thread_local, so
+    // it has to be declared on the worker thread rather than the caller's.
+    ElevationScope elevation{};
     auto installer = ServiceInstaller(logCallback);
     try {
       if(ServiceInstaller::IsInstalled()) {
@@ -120,6 +124,7 @@ void MainWindow::OnReinstallClicked(QObject *window) {
       spdlog::info(str);
       QMetaObject::invokeMethod(window, "appendLoadingOutput", Q_ARG(QVariant, QString::fromUtf8(str)));
     };
+    ElevationScope elevation{};
     auto installer = ServiceInstaller(logCallback);
     try {
       if(ServiceInstaller::IsInstalled())

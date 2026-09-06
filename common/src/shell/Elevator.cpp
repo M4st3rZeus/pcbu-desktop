@@ -258,3 +258,21 @@ Elevator &GetElevator() {
   static Elevator instance{};
   return instance;
 }
+
+namespace {
+// Depth rather than a bool so nested scopes behave.
+thread_local int g_ElevationDepth = 0;
+} // namespace
+
+ElevationScope::ElevationScope() {
+  ++g_ElevationDepth;
+}
+
+ElevationScope::~ElevationScope() {
+  if(g_ElevationDepth > 0)
+    --g_ElevationDepth;
+}
+
+bool ElevationScope::IsAllowed() {
+  return g_ElevationDepth > 0;
+}

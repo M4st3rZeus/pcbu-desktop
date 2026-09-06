@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "shell/Elevator.h"
 #include "shell/Shell.h"
 #include "storage/PairedDevicesStorage.h"
 #include "utils/AppInfo.h"
@@ -85,6 +86,9 @@ void SettingsForm::Show(QObject *viewLoader) {
 }
 
 void SettingsForm::OnSaveSettingsClicked(QObject *viewLoader, QObject *window) {
+  // Saving settings can touch /etc and the PAM config, so this is a
+  // user-initiated action allowed to prompt for elevation.
+  ElevationScope elevation{};
   AppSettings::Save(m_EditSettings.ToStorage());
   try {
     auto installer = ServiceInstaller();

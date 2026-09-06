@@ -52,4 +52,29 @@ private:
 // Process-wide instance, so one authentication covers the whole session.
 Elevator &GetElevator();
 
+// Scope guard marking a block as user-initiated, and therefore allowed to
+// raise an authentication prompt.
+//
+// Elevation is opt-in because prompting must never be a side effect of
+// something the user did not ask for. Startup reads are the motivating case:
+// PairedDevicesStorage::GetDevices() rewrites the store when it cannot parse
+// it, so without this guard merely launching the app asks for a password
+// before any window appears - which reads as "the app is broken", and trains
+// users to type credentials at unexplained prompts.
+//
+// Wrap the handler for an explicit action (Install, Uninstall, Pair, applying
+// settings) and everything underneath may elevate. Outside such a scope,
+// privileged operations fail quietly and the caller degrades.
+class ElevationScope {
+public:
+  ElevationScope();
+  ~ElevationScope();
+
+  ElevationScope(const ElevationScope &) = delete;
+  ElevationScope &operator=(const ElevationScope &) = delete;
+
+  // Whether the current call stack is inside a user-initiated action.
+  static bool IsAllowed();
+};
+
 #endif // PCBU_DESKTOP_ELEVATOR_H

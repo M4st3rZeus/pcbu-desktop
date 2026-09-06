@@ -64,6 +64,11 @@ bool Shell::IsRunningAsAdmin() {
 ShellCmdResult Shell::RunCommand(const std::string &cmd) {
   if(IsRunningAsAdmin())
     return RunUserCommand(cmd);
+  if(!ElevationScope::IsAllowed()) {
+    // Outside a user-initiated action: run unprivileged and let the caller
+    // handle the failure rather than prompting out of nowhere.
+    return RunUserCommand(cmd);
+  }
   return GetElevator().Run(cmd);
 }
 
@@ -131,6 +136,10 @@ namespace {
 bool ElevatedFallback(const boost::system::error_code &ec, const std::string &command) {
   if(Shell::IsRunningAsAdmin())
     return false;
+  // Only user-initiated actions may prompt. Without this a failed startup
+  // read would ask for a password before any window is on screen.
+  if(!ElevationScope::IsAllowed())
+    return false;
   if(ec && ec != boost::system::errc::permission_denied &&
      ec != boost::system::errc::operation_not_permitted)
     return false;
@@ -193,6 +202,8 @@ bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint
       return true;
   }
   if(IsRunningAsAdmin())
+    return false;
+  if(!ElevationScope::IsAllowed())
     return false;
 
   // Cannot pipe binary content through the helper's line protocol, so stage
