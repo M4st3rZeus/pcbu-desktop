@@ -11,35 +11,62 @@
 
 #ifdef WINDOWS
 #include <Windows.h>
+#elif defined(APPLE)
+#include <mach-o/dyld.h>
+#include <unistd.h>
 #else
 #include <unistd.h>
 #endif
 
 namespace {
 
-// Locates the privileged helper next to the running executable.
-std::filesystem::path FindHelper() {
+// Absolute path of the running executable.
+//
+// Must be the real binary path, not the working directory: the app is
+// normally launched from Finder or a bundle, where cwd is unrelated to where
+// the helper sits.
+std::filesystem::path SelfPath() {
   std::error_code ec;
 #ifdef WINDOWS
   wchar_t buf[MAX_PATH]{};
   if(GetModuleFileNameW(nullptr, buf, MAX_PATH) == 0)
     return {};
-  auto exeDir = std::filesystem::path(buf).parent_path();
-  auto candidate = exeDir / "pcbu_elevator.exe";
+  return std::filesystem::path(buf);
+#elif defined(APPLE)
+  // macOS has no /proc; _NSGetExecutablePath is the supported route.
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::string buf(size, '\0');
+  if(_NSGetExecutablePath(buf.data(), &size) != 0)
+    return {};
+  auto resolved = std::filesystem::canonical(std::filesystem::path(buf.c_str()), ec);
+  return ec ? std::filesystem::path(buf.c_str()) : resolved;
 #else
-  // The app bundle puts both binaries in Contents/MacOS; a plain build puts
-  // the helper in its own subdirectory, so check both.
   auto self = std::filesystem::read_symlink("/proc/self/exe", ec);
-  if(ec) {
-    // macOS has no /proc. Fall back to the build/bundle layout relative to cwd.
-    self.clear();
-  }
-  auto exeDir = self.empty() ? std::filesystem::current_path() : self.parent_path();
-  auto candidate = exeDir / "pcbu_elevator";
-  if(!std::filesystem::exists(candidate))
-    candidate = exeDir / "elevator" / "pcbu_elevator";
+  return ec ? std::filesystem::path{} : self;
 #endif
-  return std::filesystem::exists(candidate) ? candidate : std::filesystem::path{};
+}
+
+// Locates the privileged helper next to the running executable.
+std::filesystem::path FindHelper() {
+#ifdef WINDOWS
+  constexpr auto helperName = "pcbu_elevator.exe";
+#else
+  constexpr auto helperName = "pcbu_elevator";
+#endif
+
+  auto self = SelfPath();
+  if(self.empty())
+    return {};
+  auto exeDir = self.parent_path();
+
+  // Bundle and install layouts put it beside us; a plain cmake build leaves
+  // it in the elevator subdirectory.
+  for(const auto &candidate : {exeDir / helperName, exeDir / "elevator" / helperName}) {
+    if(std::filesystem::exists(candidate))
+      return candidate;
+  }
+  return {};
 }
 
 // Escapes a string for embedding inside an AppleScript double-quoted literal.
@@ -165,8 +192,11 @@ bool Elevator::Elevate() {
 
 ShellCmdResult Elevator::Run(const std::string &command) {
   // Root already: run directly rather than round-tripping through a helper.
+  // Calls RunUserCommand, not RunCommand: the latter now delegates here when
+  // unprivileged, and going through it would be a recursive call guarded only
+  // by an euid check.
   if(Shell::IsRunningAsAdmin())
-    return Shell::RunCommand(command);
+    return Shell::RunUserCommand(command);
 
   if(!IsElevated() && !Elevate())
     return {-1, "Not elevated."};

@@ -1,5 +1,7 @@
 #include "Shell.h"
 
+#include "shell/Elevator.h"
+
 #include <boost/filesystem.hpp>
 #ifdef WINDOWS
 #include <boost/process/v1.hpp>
@@ -50,11 +52,19 @@ bool Shell::IsRunningAsAdmin() {
 #endif
 }
 
+// Runs a command with the privileges the operation needs.
+//
+// Already root: run it directly. Otherwise route through the privileged
+// helper, which prompts once per session rather than once per command. This
+// finishes what the previous osascript stub was reaching for, without making
+// the whole GUI root - the lock server has to stay in the user's own session.
+//
+// Callers must never interpolate untrusted input: the command is executed
+// verbatim, exactly as with RunUserCommand.
 ShellCmdResult Shell::RunCommand(const std::string &cmd) {
-  /*boost::process::child proc(boost::process::search_path("osascript"), ToDo
-                             std::vector<std::string> {"-e", "do shell script \"echo test\" with administrator privileges"},
-                             boost::process::std_out > outStream);*/
-  return RunUserCommand(cmd);
+  if(IsRunningAsAdmin())
+    return RunUserCommand(cmd);
+  return GetElevator().Run(cmd);
 }
 
 ShellCmdResult Shell::RunUserCommand(const std::string &cmd) {
@@ -111,42 +121,57 @@ void Shell::SpawnCommand(const std::string &cmd) {
 #endif
 }
 
+namespace {
+
+// Retries a failed filesystem operation through the privileged helper.
+//
+// Only permission failures are worth escalating: a missing parent or an
+// invalid path fails identically as root, and prompting for those would train
+// users to click through auth dialogs.
+bool ElevatedFallback(const boost::system::error_code &ec, const std::string &command) {
+  if(Shell::IsRunningAsAdmin())
+    return false;
+  if(ec && ec != boost::system::errc::permission_denied &&
+     ec != boost::system::errc::operation_not_permitted)
+    return false;
+  return GetElevator().Run(command).exitCode == 0;
+}
+
+} // namespace
+
 bool Shell::CreateDir(const std::filesystem::path &path) {
   boost::system::error_code ec{};
   boost::filesystem::create_directories(boost::filesystem::path(path), ec);
-  return !ec.failed();
-  /*#ifdef WINDOWS
-      return RunCommand(fmt::format("mkdir \"{}\"", path.string())).exitCode == 0;
-  #else
-      return RunCommand(fmt::format("mkdir -p \"{}\"", path.string())).exitCode == 0;
-  #endif*/
+  if(!ec.failed())
+    return true;
+  // Permission denied and we are not root: retry through the privileged
+  // helper, which prompts once per session. Everything under
+  // /etc/pc-bio-unlock and the PAM/credential-provider paths lands here.
+  return ElevatedFallback(ec, fmt::format(R"(mkdir -p "{}")", path.string()));
 }
 
 bool Shell::RemoveDir(const std::filesystem::path &path) {
   boost::system::error_code ec{};
   boost::filesystem::remove(boost::filesystem::path(path), ec);
-  return !ec.failed();
-  /*#ifdef WINDOWS
-      return RunCommand(fmt::format("rd /s /q \"{}\"", path.string())).exitCode == 0;
-  #else
-      return RunCommand(fmt::format("rm -R \"{}\"", path.string())).exitCode == 0;
-  #endif*/
+  if(!ec.failed())
+    return true;
+  return ElevatedFallback(ec, fmt::format(R"(rm -R "{}")", path.string()));
 }
 
 bool Shell::CreateFile(const std::filesystem::path &path) {
   std::ofstream file(path);
-  return file.is_open();
+  if(file.is_open())
+    return true;
+  boost::system::error_code ec{boost::system::errc::permission_denied, boost::system::generic_category()};
+  return ElevatedFallback(ec, fmt::format(R"(touch "{}")", path.string()));
 }
 
 bool Shell::RemoveFile(const std::filesystem::path &path) {
   boost::system::error_code ec{};
   boost::filesystem::remove(boost::filesystem::path(path), ec);
-  return !ec.failed();
-  /*#ifdef WINDOWS
-      return RunCommand(fmt::format("del \"{}\"", path.string())).exitCode == 0;
-  #else
-      return RunCommand(fmt::format("rm \"{}\"", path.string())).exitCode == 0;
-  #endif*/
+  if(!ec.failed())
+    return true;
+  return ElevatedFallback(ec, fmt::format(R"(rm -f "{}")", path.string()));
 }
 
 std::vector<uint8_t> Shell::ReadBytes(const std::filesystem::path &path) {
@@ -160,8 +185,42 @@ std::vector<uint8_t> Shell::ReadBytes(const std::filesystem::path &path) {
 }
 
 bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint8_t> &data) {
-  std::ofstream file(path, std::ios::out | std::ios::binary);
-  file.write(reinterpret_cast<const char *>(data.data()), (std::streamsize)data.size());
-  file.close();
-  return !file.fail() && !file.bad();
+  {
+    std::ofstream file(path, std::ios::out | std::ios::binary);
+    file.write(reinterpret_cast<const char *>(data.data()), (std::streamsize)data.size());
+    file.close();
+    if(!file.fail() && !file.bad())
+      return true;
+  }
+  if(IsRunningAsAdmin())
+    return false;
+
+  // Cannot pipe binary content through the helper's line protocol, so stage
+  // it in a temp file the user can write and have root move it into place.
+  // The staged copy is removed even on failure - it may hold the encrypted
+  // password blob.
+  auto temp = std::filesystem::temp_directory_path() /
+              fmt::format("pcbu_stage_{}", StringUtils::RandomString(16));
+  {
+    std::ofstream tmpFile(temp, std::ios::out | std::ios::binary);
+    if(!tmpFile)
+      return false;
+    tmpFile.write(reinterpret_cast<const char *>(data.data()), (std::streamsize)data.size());
+    tmpFile.close();
+    if(tmpFile.fail() || tmpFile.bad()) {
+      std::error_code rmEc{};
+      std::filesystem::remove(temp, rmEc);
+      return false;
+    }
+  }
+
+  auto moved = GetElevator()
+                   .Run(fmt::format(R"(mkdir -p "{}" && mv -f "{}" "{}")",
+                                    path.parent_path().string(), temp.string(), path.string()))
+                   .exitCode == 0;
+  std::error_code rmEc{};
+  std::filesystem::remove(temp, rmEc);
+  if(!moved)
+    spdlog::error("Failed to write '{}' even with elevation.", path.string());
+  return moved;
 }
