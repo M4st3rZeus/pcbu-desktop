@@ -305,12 +305,23 @@ bool Elevator::Elevate() {
     return false;
   }
 
-  // Detached with nohup so it survives the elevation wrapper exiting, which
-  // is what makes one prompt cover the whole session. The token goes through
-  // the environment rather than argv, since argv is world-readable via ps.
-  auto launch = fmt::format("mkdir -p {} && PCBU_ELEVATOR_TOKEN={} nohup {} {} {} {} >/dev/null 2>&1 &",
-                            Quote(std::filesystem::path(socketPath).parent_path().string()), Quote(token),
-                            Quote(helper.string()), Quote(socketPath), getuid(), getpid());
+  // Detached so it survives the elevation wrapper exiting, which is what
+  // makes one prompt cover the whole session. The token goes through the
+  // environment rather than argv, since argv is world-readable via ps.
+  //
+  // `</dev/null >/dev/null 2>&1` on the helper is load-bearing, not tidiness.
+  // A backgrounded child inherits the wrapper's stdout pipe and holds it open
+  // for its whole lifetime, so the parent's read loop waits for an EOF that
+  // never arrives - Elevate() hung forever and the app never finished
+  // starting. Closing all three descriptors lets the pipe reach EOF as soon
+  // as the wrapper itself exits.
+  // The braces matter twice over. RunElevatedOnce appends "; echo MARKER=$?"
+  // to recover the exit code, and `cmd & ; echo` is a shell syntax error - so
+  // without them the launch never ran at all and the marker never appeared.
+  auto launch = fmt::format(
+      "mkdir -p {} && {{ PCBU_ELEVATOR_TOKEN={} nohup {} {} {} {} </dev/null >/dev/null 2>&1 & }}",
+      Quote(std::filesystem::path(socketPath).parent_path().string()), Quote(token), Quote(helper.string()),
+      Quote(socketPath), getuid(), getpid());
 
   auto result = RunElevatedOnce(launch);
   if(result.exitCode != 0) {
