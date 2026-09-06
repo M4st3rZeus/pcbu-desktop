@@ -61,6 +61,28 @@ void ServiceInstaller::Install() {
 }
 
 void ServiceInstaller::Uninstall() {
+  // Deregister from PAM *before* deleting anything.
+  //
+  // A `sufficient` line pointing at a missing module does not fail soft: PAM
+  // refuses to initialise the whole stack, so sudo and every admin dialog
+  // start rejecting correct passwords with "unable to initialize PAM". Doing
+  // this in the caller (Uninstall then ClearSettings) left exactly that
+  // window open, and an exception in between made it permanent - which is
+  // how a failed reinstall locked a user out of authentication entirely.
+  //
+  // Removing the entries here means the config is never left referencing a
+  // file that is about to disappear, whatever the caller does or however
+  // this fails partway.
+  m_Logger("Deregistering from PAM...");
+  try {
+    ClearSettings();
+  } catch(const std::exception &ex) {
+    // Keep going: leaving the binaries behind is recoverable, leaving PAM
+    // pointing at a deleted module is not. Report it and continue.
+    spdlog::error("Failed clearing PAM settings: {}", ex.what());
+    m_Logger("Warning: could not fully deregister from PAM.");
+  }
+
   m_Logger("Removing binary module...");
   auto exePath = EXE_MODULE_DIR / EXE_MODULE_FILE;
   auto result = Shell::RemoveFile(exePath);

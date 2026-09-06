@@ -138,6 +138,26 @@ void ServiceInstaller::Install() {
 }
 
 void ServiceInstaller::Uninstall() {
+  // Deregister from PAM *before* deleting anything.
+  //
+  // A `sufficient` line pointing at a missing module does not fail soft: PAM
+  // refuses to initialise the whole stack, so every service using it starts
+  // rejecting correct passwords. On Linux that includes login and polkit, so
+  // a dangling entry can lock the user out of the desktop entirely - worse
+  // than the sudo breakage this was first seen causing on macOS.
+  //
+  // Doing this in the caller (Uninstall then ClearSettings) left that window
+  // open, and an exception in between made it permanent.
+  m_Logger("Deregistering from PAM...");
+  try {
+    ClearSettings();
+  } catch(const std::exception &ex) {
+    // Keep going: orphaned binaries are recoverable, a PAM config pointing at
+    // a deleted module is not.
+    spdlog::error("Failed clearing PAM settings: {}", ex.what());
+    m_Logger("Warning: could not fully deregister from PAM.");
+  }
+
   m_Logger("Removing binary module...");
   auto exePath = EXE_MODULE_DIR / EXE_MODULE_FILE;
   auto result = Shell::RemoveFile(exePath);

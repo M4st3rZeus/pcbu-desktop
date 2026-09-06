@@ -109,8 +109,11 @@ void MainWindow::OnInstallClicked(QObject *window) {
     auto installer = ServiceInstaller(logCallback);
     try {
       if(ServiceInstaller::IsInstalled()) {
+        // Uninstall() deregisters from PAM itself before deleting anything.
+        // ClearSettings() is no longer called here: doing it after Uninstall
+        // left the PAM config pointing at a module that had already been
+        // deleted, and an exception in between made that permanent.
         installer.Uninstall();
-        installer.ClearSettings();
       } else {
         installer.Install();
         installer.ApplySettings(installer.GetSettings(), true);
