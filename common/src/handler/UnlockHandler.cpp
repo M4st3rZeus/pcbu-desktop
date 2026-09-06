@@ -3,6 +3,7 @@
 #include "KeyScanner.h"
 #include "connection/unlock/clients/BTUnlockClient.h"
 #include "connection/unlock/clients/TCPUnlockClient.h"
+#include "connection/unlock/servers/BLEUnlockServer.h"
 #include "connection/unlock/servers/TCPUnlockServer.h"
 #include "storage/AppSettings.h"
 
@@ -37,6 +38,11 @@ UnlockResult UnlockHandler::GetResult(const std::string &authUser, const std::st
         break;
       case PairingMethod::BLUETOOTH:
         connection = new BTUnlockClient(device.bluetoothAddress, device);
+        break;
+      case PairingMethod::BLE:
+        // The PC advertises a GATT service and the phone connects to it, so
+        // this is a server even though Classic Bluetooth uses a client here.
+        connection = new BLEUnlockServer(device);
         break;
       case PairingMethod::MANUAL_UDP:
       case PairingMethod::UDP: {

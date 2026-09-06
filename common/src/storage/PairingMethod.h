@@ -4,7 +4,9 @@
 #include <spdlog/spdlog.h>
 #include <string>
 
-enum class PairingMethod : int { TCP, BLUETOOTH, CLOUD_TCP, CLOUD_BT, UDP, MANUAL_UDP };
+// BLE is appended, never inserted: the numeric values are persisted in the
+// paired-devices file, so reordering would silently remap existing devices.
+enum class PairingMethod : int { TCP, BLUETOOTH, CLOUD_TCP, CLOUD_BT, UDP, MANUAL_UDP, BLE };
 
 class PairingMethodUtils {
 public:
@@ -21,6 +23,8 @@ public:
       return "UDP";
     else if(method == PairingMethod::MANUAL_UDP)
       return "MANUAL_UDP";
+    else if(method == PairingMethod::BLE)
+      return "BLE";
     spdlog::warn("Unknown pairing method.");
     return {};
   }
@@ -38,6 +42,8 @@ public:
       return PairingMethod::UDP;
     else if(methodStr == "MANUAL_UDP")
       return PairingMethod::MANUAL_UDP;
+    else if(methodStr == "BLE")
+      return PairingMethod::BLE;
     spdlog::warn("Invalid pairing method '{}'.", methodStr);
     return PairingMethod::TCP;
   }

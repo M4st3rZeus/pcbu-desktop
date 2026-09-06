@@ -26,6 +26,7 @@ if(WIN32)
     set(PLATFORM_SRC
             src/connection/unlock/clients/BTUnlockClient.cpp
             src/connection/unlock/servers/BTUnlockServer.cpp
+            src/connection/unlock/servers/BLEUnlockServer.Stub.cpp
             src/platform/PlatformHelper.Win.cpp
             src/platform/BluetoothHelper.Win.cpp
             src/utils/RegistryUtils.cpp
@@ -41,11 +42,13 @@ elseif(APPLE)
             "-framework Carbon"
             "-framework IOKit"
             "-framework IOBluetooth"
+            "-framework CoreBluetooth"
             "-framework Security"
     )
     set(PLATFORM_SRC
             src/connection/unlock/clients/BTUnlockClient.Mac.mm
             src/connection/unlock/servers/BTUnlockServer.Mac.mm
+            src/connection/unlock/servers/BLEUnlockServer.Mac.mm
             src/platform/PlatformHelper.Mac.cpp
             src/platform/BluetoothHelper.Mac.mm
     )
@@ -61,6 +64,7 @@ elseif(UNIX)
     set(PLATFORM_SRC
             src/connection/unlock/clients/BTUnlockClient.cpp
             src/connection/unlock/servers/BTUnlockServer.cpp
+            src/connection/unlock/servers/BLEUnlockServer.Stub.cpp
             src/platform/PlatformHelper.Linux.cpp
             src/platform/BluetoothHelper.Linux.cpp
     )
@@ -85,6 +89,10 @@ add_library(pcbu_common
         src/connection/unlock/clients/TCPUnlockClient.cpp
         src/connection/unlock/clients/BTUnlockClient.h
         src/connection/unlock/servers/BTUnlockServer.h
+        src/connection/unlock/servers/BLEChunking.h
+        src/connection/unlock/servers/BLEChunking.cpp
+        src/connection/unlock/servers/BLEUnlockServer.h
+        src/connection/unlock/servers/BLEUnlockServer.cpp
         src/connection/unlock/servers/TCPUnlockServer.cpp
         src/connection/unlock/servers/TCPUnlockServer.h
         src/handler/KeyScanner.h
