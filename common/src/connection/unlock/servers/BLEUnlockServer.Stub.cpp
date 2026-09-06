@@ -8,7 +8,7 @@
 // API; neither exists yet. Returning nullptr makes BLEUnlockServer::Start()
 // fail cleanly with a logged reason instead of half-working, and pairing
 // hides the BLE method on any platform where this is the active backend.
-std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral() {
+std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral(const BLEServiceIds &) {
   spdlog::error("BLE unlock is not implemented on this platform yet.");
   return nullptr;
 }

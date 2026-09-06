@@ -41,7 +41,7 @@ constexpr winrt::guid ParseUuid(std::string_view uuid) {
 
 class WinBLEPeripheral : public IBLEPeripheral {
 public:
-  WinBLEPeripheral() = default;
+  explicit WinBLEPeripheral(const BLEServiceIds &ids) : m_Ids(ids) {}
   ~WinBLEPeripheral() override { Stop(); }
 
   bool Start() override;
@@ -65,6 +65,7 @@ private:
   std::atomic<bool> m_HasSubscriber{};
   mutable std::mutex m_Mutex{};
   std::atomic<size_t> m_MaxPayload{BLE_DEFAULT_PAYLOAD_PER_CHUNK};
+  BLEServiceIds m_Ids{};
 };
 
 bool WinBLEPeripheral::Start() {
@@ -93,7 +94,7 @@ bool WinBLEPeripheral::Start() {
       return false;
     }
 
-    auto serviceResult = GattServiceProvider::CreateAsync(ParseUuid(BLE_SERVICE_UUID)).get();
+    auto serviceResult = GattServiceProvider::CreateAsync(ParseUuid(m_Ids.service)).get();
     if(serviceResult.Error() != BluetoothError::Success) {
       spdlog::error("BLE: failed to create GATT service. (Error={})", static_cast<int>(serviceResult.Error()));
       return false;
@@ -105,7 +106,7 @@ bool WinBLEPeripheral::Start() {
     GattLocalCharacteristicParameters rxParams{};
     rxParams.CharacteristicProperties(GattCharacteristicProperties::Write);
     rxParams.WriteProtectionLevel(GattProtectionLevel::Plain);
-    auto rxResult = m_Provider.Service().CreateCharacteristicAsync(ParseUuid(BLE_RX_CHAR_UUID), rxParams).get();
+    auto rxResult = m_Provider.Service().CreateCharacteristicAsync(ParseUuid(m_Ids.rxChar), rxParams).get();
     if(rxResult.Error() != BluetoothError::Success) {
       spdlog::error("BLE: failed to create RX characteristic. (Error={})", static_cast<int>(rxResult.Error()));
       Stop();
@@ -117,7 +118,7 @@ bool WinBLEPeripheral::Start() {
     GattLocalCharacteristicParameters txParams{};
     txParams.CharacteristicProperties(GattCharacteristicProperties::Notify);
     txParams.ReadProtectionLevel(GattProtectionLevel::Plain);
-    auto txResult = m_Provider.Service().CreateCharacteristicAsync(ParseUuid(BLE_TX_CHAR_UUID), txParams).get();
+    auto txResult = m_Provider.Service().CreateCharacteristicAsync(ParseUuid(m_Ids.txChar), txParams).get();
     if(txResult.Error() != BluetoothError::Success) {
       spdlog::error("BLE: failed to create TX characteristic. (Error={})", static_cast<int>(txResult.Error()));
       Stop();
@@ -254,6 +255,6 @@ bool WinBLEPeripheral::IsConnected() const {
 
 } // namespace
 
-std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral() {
-  return std::make_unique<WinBLEPeripheral>();
+std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral(const BLEServiceIds &ids) {
+  return std::make_unique<WinBLEPeripheral>(ids);
 }

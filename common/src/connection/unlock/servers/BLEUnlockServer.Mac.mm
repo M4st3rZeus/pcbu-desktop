@@ -37,7 +37,7 @@ struct DelegateContext {
 
 class MacBLEPeripheral : public IBLEPeripheral {
 public:
-  MacBLEPeripheral();
+  explicit MacBLEPeripheral(const BLEServiceIds &ids);
   ~MacBLEPeripheral() override;
 
   bool Start() override;
@@ -58,6 +58,7 @@ public:
   CBMutableCharacteristic *m_RxChar{};
   PCBUPeripheralDelegate *m_Delegate{};
   DelegateContext m_Context{};
+  BLEServiceIds m_Ids{};
 
   std::atomic<bool> m_PoweredOn{};
   std::atomic<bool> m_PowerFailed{};
@@ -125,7 +126,7 @@ public:
 
 namespace {
 
-MacBLEPeripheral::MacBLEPeripheral() {
+MacBLEPeripheral::MacBLEPeripheral(const BLEServiceIds &ids) : m_Ids(ids) {
   m_Context.owner = this;
 }
 
@@ -195,9 +196,9 @@ bool MacBLEPeripheral::Start() {
       return false;
     }
 
-    auto serviceUUID = [CBUUID UUIDWithString:@(BLE_SERVICE_UUID)];
-    auto rxUUID = [CBUUID UUIDWithString:@(BLE_RX_CHAR_UUID)];
-    auto txUUID = [CBUUID UUIDWithString:@(BLE_TX_CHAR_UUID)];
+    auto serviceUUID = [CBUUID UUIDWithString:@(m_Ids.service)];
+    auto rxUUID = [CBUUID UUIDWithString:@(m_Ids.rxChar)];
+    auto txUUID = [CBUUID UUIDWithString:@(m_Ids.txChar)];
 
     // RX: the phone writes chunks here. writeWithoutResponse would be faster
     // but gives no backpressure, and a dropped chunk desyncs reassembly.
@@ -219,7 +220,7 @@ bool MacBLEPeripheral::Start() {
 
     [m_Manager startAdvertising:@{
       CBAdvertisementDataServiceUUIDsKey : @[ serviceUUID ],
-      CBAdvertisementDataLocalNameKey : @"PC Bio Unlock"
+      CBAdvertisementDataLocalNameKey : @(m_Ids.localName)
     }];
     return true;
   }
@@ -301,6 +302,6 @@ bool MacBLEPeripheral::IsConnected() const {
 
 } // namespace
 
-std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral() {
-  return std::make_unique<MacBLEPeripheral>();
+std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral(const BLEServiceIds &ids) {
+  return std::make_unique<MacBLEPeripheral>(ids);
 }

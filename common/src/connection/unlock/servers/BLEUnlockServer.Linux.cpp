@@ -96,7 +96,7 @@ void AppendStringArrayVariant(DBusMessageIter *dict, const char *key, const std:
 
 class LinuxBLEPeripheral : public IBLEPeripheral {
 public:
-  LinuxBLEPeripheral() = default;
+  explicit LinuxBLEPeripheral(const BLEServiceIds &ids) : m_Ids(ids) {}
   ~LinuxBLEPeripheral() override { Stop(); }
 
   bool Start() override;
@@ -130,6 +130,7 @@ private:
   std::atomic<bool> m_Notifying{};
   std::atomic<size_t> m_MaxPayload{BLE_DEFAULT_PAYLOAD_PER_CHUNK};
   std::string m_AdapterPath{};
+  BLEServiceIds m_Ids{};
   std::mutex m_SendMutex{};
 };
 
@@ -383,16 +384,16 @@ DBusHandlerResult LinuxBLEPeripheral::OnGetManagedObjects(DBusConnection *conn, 
   };
 
   addObject(SERVICE_PATH, IFACE_GATT_SERVICE, [](DBusMessageIter *props) {
-    AppendStringVariant(props, "UUID", BLE_SERVICE_UUID);
+    AppendStringVariant(props, "UUID", m_Ids.service);
     AppendBoolVariant(props, "Primary", true);
   });
   addObject(RX_PATH, IFACE_GATT_CHAR, [](DBusMessageIter *props) {
-    AppendStringVariant(props, "UUID", BLE_RX_CHAR_UUID);
+    AppendStringVariant(props, "UUID", m_Ids.rxChar);
     AppendObjectPathVariant(props, "Service", SERVICE_PATH);
     AppendStringArrayVariant(props, "Flags", {"write"});
   });
   addObject(TX_PATH, IFACE_GATT_CHAR, [](DBusMessageIter *props) {
-    AppendStringVariant(props, "UUID", BLE_TX_CHAR_UUID);
+    AppendStringVariant(props, "UUID", m_Ids.txChar);
     AppendObjectPathVariant(props, "Service", SERVICE_PATH);
     AppendStringArrayVariant(props, "Flags", {"notify"});
   });
@@ -413,20 +414,20 @@ DBusHandlerResult LinuxBLEPeripheral::OnPropertiesGetAll(DBusConnection *conn, D
   dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY, "{sv}", &props);
 
   if(std::strcmp(path, SERVICE_PATH) == 0) {
-    AppendStringVariant(&props, "UUID", BLE_SERVICE_UUID);
+    AppendStringVariant(&props, "UUID", m_Ids.service);
     AppendBoolVariant(&props, "Primary", true);
   } else if(std::strcmp(path, RX_PATH) == 0) {
-    AppendStringVariant(&props, "UUID", BLE_RX_CHAR_UUID);
+    AppendStringVariant(&props, "UUID", m_Ids.rxChar);
     AppendObjectPathVariant(&props, "Service", SERVICE_PATH);
     AppendStringArrayVariant(&props, "Flags", {"write"});
   } else if(std::strcmp(path, TX_PATH) == 0) {
-    AppendStringVariant(&props, "UUID", BLE_TX_CHAR_UUID);
+    AppendStringVariant(&props, "UUID", m_Ids.txChar);
     AppendObjectPathVariant(&props, "Service", SERVICE_PATH);
     AppendStringArrayVariant(&props, "Flags", {"notify"});
   } else if(std::strcmp(path, ADV_PATH) == 0) {
     AppendStringVariant(&props, "Type", "peripheral");
-    AppendStringArrayVariant(&props, "ServiceUUIDs", {BLE_SERVICE_UUID});
-    AppendStringVariant(&props, "LocalName", "PC Bio Unlock");
+    AppendStringArrayVariant(&props, "ServiceUUIDs", {m_Ids.service});
+    AppendStringVariant(&props, "LocalName", m_Ids.localName);
   }
 
   dbus_message_iter_close_container(&args, &props);
@@ -582,6 +583,6 @@ bool LinuxBLEPeripheral::IsConnected() const {
 
 } // namespace
 
-std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral() {
-  return std::make_unique<LinuxBLEPeripheral>();
+std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral(const BLEServiceIds &ids) {
+  return std::make_unique<LinuxBLEPeripheral>(ids);
 }

@@ -99,6 +99,8 @@ add_library(pcbu_common
         src/connection/UDPBroadcaster.h
         src/connection/pairing/PairingServer.cpp
         src/connection/pairing/PairingServer.h
+        src/connection/pairing/BLEPairingServer.cpp
+        src/connection/pairing/BLEPairingServer.h
         src/connection/pairing/UDPPairingBroadcaster.cpp
         src/connection/pairing/UDPPairingBroadcaster.h
         src/connection/pairing/PairingStructs.h

@@ -17,6 +17,8 @@ PairingForm::~PairingForm() {
     m_BluetoothPairThread.join();
   if(m_PairingServer)
     m_PairingServer->Stop();
+  if(m_BLEPairingServer)
+    m_BLEPairingServer->Stop();
   if(m_DiscoveryBeacon)
     m_DiscoveryBeacon->Stop();
 }
@@ -117,15 +119,31 @@ void PairingForm::UpdateStepForm(QObject *viewLoader, QObject *window) {
     // 0600, so the save that happens later on the PairingServer's client
     // thread writes without privileges - and without a password prompt
     // landing on the user mid-pairing.
-    m_PairingServer->Start(uiData);
+    if(uiData.method == PairingMethod::BLE) {
+      // BLE pairs over GATT, so neither the TCP server nor the UDP discovery
+      // beacon is involved - the phone finds this PC by its advertisement.
+      // That is the whole point: no shared network required.
+      m_PairingServer.reset();
+      m_BLEPairingServer = std::make_unique<BLEPairingServer>([window](const std::string &error) {
+        QMetaObject::invokeMethod(window, "showErrorMessage", Q_ARG(QVariant, QString::fromUtf8(error)));
+      });
+      m_BLEPairingServer->Start(uiData);
+    } else {
+      m_BLEPairingServer.reset();
+      m_PairingServer->Start(uiData);
 
-    if(!m_PairingData.useLegacyPairing) {
-      m_DiscoveryBeacon = std::make_unique<UDPPairingBroadcaster>(m_ServerId, m_EncKey);
-      m_DiscoveryBeacon->Start();
+      if(!m_PairingData.useLegacyPairing) {
+        m_DiscoveryBeacon = std::make_unique<UDPPairingBroadcaster>(m_ServerId, m_EncKey);
+        m_DiscoveryBeacon->Start();
+      }
     }
   } else {
     m_ServerId = {};
     m_EncKey = {};
+    if(m_BLEPairingServer) {
+      m_BLEPairingServer->Stop();
+      m_BLEPairingServer.reset();
+    }
     if(m_PairingServer) {
       m_PairingServer->Stop();
     }

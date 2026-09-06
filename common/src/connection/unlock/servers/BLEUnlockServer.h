@@ -52,7 +52,26 @@ public:
 };
 
 // Creates the platform peripheral. Returns nullptr where BLE is unsupported.
-std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral();
+// Which GATT service a peripheral should host.
+//
+// Pairing and unlock use different services so a phone scanning to pair never
+// matches a PC merely waiting for an unlock, and both can advertise at once.
+struct BLEServiceIds {
+  const char *service{};
+  const char *rxChar{};
+  const char *txChar{};
+  const char *localName{};
+};
+
+// Creates the platform peripheral for the given service. Returns nullptr
+// where BLE is unsupported.
+std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral(const BLEServiceIds &ids);
+
+// Convenience for the unlock service, which is the original caller.
+inline std::unique_ptr<IBLEPeripheral> CreateBLEPeripheral() {
+  return CreateBLEPeripheral(
+      BLEServiceIds{BLE_SERVICE_UUID, BLE_RX_CHAR_UUID, BLE_TX_CHAR_UUID, "PC Bio Unlock"});
+}
 
 // Unlock over BLE GATT.
 //

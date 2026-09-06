@@ -5,6 +5,7 @@
 #include <stack>
 
 #include "connection/pairing/UDPPairingBroadcaster.h"
+#include "connection/pairing/BLEPairingServer.h"
 #include "connection/pairing/PairingServer.h"
 #include "shell/Elevator.h"
 
@@ -75,6 +76,9 @@ private:
   std::thread m_BluetoothScanThread{};
   std::thread m_BluetoothPairThread{};
   std::unique_ptr<PairingServer> m_PairingServer = nullptr;
+  // Used instead of m_PairingServer when the BLE method is chosen: pairing
+  // then runs over GATT rather than TCP, so no Wi-Fi is needed at all.
+  std::unique_ptr<BLEPairingServer> m_BLEPairingServer = nullptr;
   std::unique_ptr<UDPPairingBroadcaster> m_DiscoveryBeacon = nullptr;
 };
 
