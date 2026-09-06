@@ -41,6 +41,14 @@ public:
   // there is no sanitising layer, by design (see the helper's own comment).
   ShellCmdResult Run(const std::string &command);
 
+  // Runs a command only if the helper is already up, never starting one.
+  //
+  // For work that happens without the user asking - reading the paired
+  // devices at startup, for instance. Starting a helper there would put a
+  // password prompt on screen before the window appears, which reads as the
+  // app being broken. Returns a non-zero exit code when no helper is running.
+  ShellCmdResult RunIfElevated(const std::string &command);
+
   // Stops the helper. Safe to call when not running.
   void Shutdown();
 

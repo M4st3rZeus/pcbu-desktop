@@ -65,6 +65,15 @@ void PairedDevicesStorage::RemoveDevice(const std::string &id) {
 
 std::vector<PairedDevice> PairedDevicesStorage::GetDevices() {
   std::vector<PairedDevice> result{};
+  // Reading needs root too, not just writing: the store is chmod 600
+  // root-owned so pcbu_auth can use it at the login screen. Without this the
+  // desktop app showed an empty device list for a perfectly good store - the
+  // phone paired, unlock worked, and the app still said nothing was paired.
+  //
+  // Safe to elevate here because the helper is already running once the user
+  // has done anything privileged this session; if it is not, the read simply
+  // fails as before rather than prompting out of nowhere.
+  ElevationScope elevation{};
   try {
     auto filePath = AppSettings::GetBaseDir() / DEVICES_FILE_NAME;
 #ifdef WINDOWS

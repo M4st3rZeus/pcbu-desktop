@@ -223,14 +223,51 @@ bool Shell::RemoveFile(const std::filesystem::path &path) {
   return ElevatedFallback(ec, fmt::format("rm -f {}", ShellQuote(path.string())));
 }
 
-std::vector<uint8_t> Shell::ReadBytes(const std::filesystem::path &path) {
-  std::ifstream file{};
-  file.open(path, std::ios_base::binary);
-  if(!file) {
+std::vector<uint8_t> Shell::ReadBytes(const std::filesystem::path &path) try {
+  {
+    std::ifstream file{};
+    file.open(path, std::ios_base::binary);
+    if(file)
+      return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+  }
+
+  // Root-owned, mode 600 files are the normal case here, not an error: the
+  // paired-devices store is deliberately readable only by root so that
+  // pcbu_auth can use it at the login screen. Without an elevated fallback
+  // the desktop app simply saw an empty list for a store that was fine.
+  if(IsRunningAsAdmin() || !ElevationScope::IsAllowed() || !std::filesystem::exists(path)) {
     spdlog::error("Failed to open file '{}'.", path.string());
     return {};
   }
-  return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+
+  // Copy to a staging file this user can read, rather than piping the content
+  // through the helper's line protocol - the store is text today but the same
+  // path is used for binary payloads.
+  auto temp = std::filesystem::temp_directory_path() /
+              fmt::format("pcbu_read_{}", RandomHexName(8));
+  // RunIfElevated, not Run: a read must never be the thing that raises a
+  // password prompt. If no helper is up yet the read fails and the caller
+  // shows an empty list, which is recoverable - a prompt appearing before the
+  // window is not.
+  auto result = GetElevator().RunIfElevated(fmt::format("cat {} > {} && chown {} {}", ShellQuote(path.string()),
+                                                        ShellQuote(temp.string()), getuid(),
+                                                        ShellQuote(temp.string())));
+  std::vector<uint8_t> data{};
+  if(result.exitCode == 0) {
+    std::ifstream staged(temp, std::ios_base::binary);
+    if(staged)
+      data.assign(std::istreambuf_iterator<char>(staged), std::istreambuf_iterator<char>());
+  } else {
+    spdlog::error("Failed to read '{}' even with elevation. (Code={}, Output={})", path.string(), result.exitCode,
+                  result.output);
+  }
+  // Always remove the copy: it may hold the encrypted password blob.
+  std::error_code rmEc{};
+  std::filesystem::remove(temp, rmEc);
+  return data;
+} catch(const std::exception &ex) {
+  spdlog::error("Failed to read '{}': {}", path.string(), ex.what());
+  return {};
 }
 
 bool Shell::WriteBytes(const std::filesystem::path &path, const std::vector<uint8_t> &data) try {

@@ -380,6 +380,21 @@ ShellCmdResult Elevator::Run(const std::string &command) try {
   return {-1, ex.what()};
 }
 
+ShellCmdResult Elevator::RunIfElevated(const std::string &command) {
+  if(Shell::IsRunningAsAdmin())
+    return Shell::RunUserCommand(command);
+#ifndef WINDOWS
+  {
+    std::lock_guard lock(m_Impl->mutex);
+    if(!m_Impl->helperRunning)
+      return {-1, "No privileged helper running."};
+  }
+  return Run(command);
+#else
+  return {-1, "Not implemented."};
+#endif
+}
+
 void Elevator::Shutdown() {
 #ifndef WINDOWS
   std::lock_guard lock(m_Impl->mutex);

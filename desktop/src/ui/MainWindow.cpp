@@ -46,7 +46,19 @@ bool MainWindow::PerformStartupChecks(QObject *viewLoader, QObject *window) {
   // to live in the user's own interactive session, and every platform's lock
   // API refuses to act on a session the caller is not part of.
   if(!Shell::IsRunningAsAdmin()) {
-    spdlog::info("Running without admin rights; privileged actions will prompt for elevation.");
+    // Start the privileged helper once, here, rather than on first use.
+    //
+    // Everything this app does with its own data needs root: the store lives
+    // in /etc/pc-bio-unlock and is chmod 600 root-owned so pcbu_auth can read
+    // it at the login screen. Even listing paired devices is a privileged
+    // read. Authenticating once at startup means the device list is populated
+    // and every later action - pair, install, remove - is silent.
+    //
+    // This runs after the window exists, so the prompt appears over a visible
+    // app rather than in front of nothing.
+    spdlog::info("Starting privileged helper...");
+    if(!GetElevator().Elevate())
+      spdlog::warn("Elevation declined; paired devices cannot be read and privileged actions will fail.");
   }
 #if defined(LINUX) || defined(APPLE)
   if(Shell::RunUserCommand("which bash").exitCode != 0) {
