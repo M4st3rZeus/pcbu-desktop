@@ -13,10 +13,6 @@
 #include <Windows.h>
 #include <aclapi.h>
 #include <sddl.h>
-#elif APPLE
-#define CHOWN_USER "root"
-#elif LINUX
-#define CHOWN_USER "root:root"
 #endif
 
 std::optional<PairedDevice> PairedDevicesStorage::GetDeviceByID(const std::string &id) {
@@ -206,9 +202,32 @@ void PairedDevicesStorage::ProtectFile(const std::string &filePath, bool protect
   }
 #elif defined(APPLE) || defined(LINUX)
   if(protect) {
-    // Single-quoted: double quotes still expand $ and backticks.
+    // Owned by the user who runs the app, mode 0600.
+    //
+    // This used to chown to root, which locked the GUI out of its own store:
+    // the app runs unprivileged, so listing paired devices failed and the
+    // user had to run `sudo chown -R $(whoami) /etc/pc-bio-unlock` by hand
+    // after every pairing.
+    //
+    // Root ownership bought nothing. pcbu_auth runs as root and reads any
+    // file regardless of owner, and nothing anywhere validates that the store
+    // is root-owned before trusting it - so 0600 is what actually protects
+    // the encrypted password blob from other users, not the owning uid.
+    //
+    // chown is skipped entirely when not elevated: the file is created by
+    // this user anyway, so it already has the right owner, and asking for a
+    // password just to confirm that would be gratuitous.
     auto quoted = std::string("'") + filePath + "'";
-    auto cmd = Shell::RunCommand(fmt::format("chown {0} {1} && chmod 600 {1}", CHOWN_USER, quoted));
+    ShellCmdResult cmd{};
+    if(Shell::IsRunningAsAdmin()) {
+      // Running as root (pcbu_auth, or a sudo launch): hand the file back to
+      // the logging-in user rather than leaving it root-owned.
+      auto owner = std::getenv("SUDO_UID");
+      cmd = Shell::RunUserCommand(fmt::format("chown {0} {1} && chmod 600 {1}",
+                                              owner != nullptr ? owner : "root", quoted));
+    } else {
+      cmd = Shell::RunUserCommand(fmt::format("chmod 600 {}", quoted));
+    }
     if(cmd.exitCode != 0)
       throw std::runtime_error(
           fmt::format("Error setting file permissions. (Code={}, Output={})", cmd.exitCode, cmd.output));

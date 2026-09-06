@@ -74,9 +74,6 @@ private:
   bool m_IsBluetoothScanRunning{};
   std::thread m_BluetoothScanThread{};
   std::thread m_BluetoothPairThread{};
-  // Open while a pairing attempt is in flight, so the save that happens on
-  // the PairingServer's thread can elevate without a second prompt.
-  std::unique_ptr<ElevationSession> m_Elevation = nullptr;
   std::unique_ptr<PairingServer> m_PairingServer = nullptr;
   std::unique_ptr<UDPPairingBroadcaster> m_DiscoveryBeacon = nullptr;
 };
