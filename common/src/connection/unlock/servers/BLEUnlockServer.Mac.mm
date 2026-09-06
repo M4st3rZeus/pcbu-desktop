@@ -59,6 +59,7 @@ public:
   PCBUPeripheralDelegate *m_Delegate{};
   DelegateContext m_Context{};
   BLEServiceIds m_Ids{};
+  dispatch_queue_t m_Queue{};
 
   std::atomic<bool> m_PoweredOn{};
   std::atomic<bool> m_PowerFailed{};
@@ -179,7 +180,16 @@ bool MacBLEPeripheral::Start() {
   @autoreleasepool {
     m_Delegate = [[PCBUPeripheralDelegate alloc] init];
     m_Delegate.ctx = &m_Context;
-    m_Manager = [[CBPeripheralManager alloc] initWithDelegate:m_Delegate queue:nil];
+
+    // A dedicated queue, not nil.
+    //
+    // Passing nil delivers every callback on the main queue, and Start() is
+    // called from the main thread (QML -> PairingForm::UpdateStepForm) and
+    // then blocks below waiting for the power-on callback. That callback
+    // could never run, so the wait always timed out and the peripheral
+    // reported "did not power on" even with Bluetooth switched on.
+    m_Queue = dispatch_queue_create("com.pcbu.ble", DISPATCH_QUEUE_SERIAL);
+    m_Manager = [[CBPeripheralManager alloc] initWithDelegate:m_Delegate queue:m_Queue];
 
     // The radio reports its state asynchronously; wait briefly for it rather
     // than advertising into a powered-off adapter.
@@ -240,6 +250,13 @@ void MacBLEPeripheral::Stop() {
       m_Delegate.ctx = nullptr;
       PCBU_RELEASE(m_Delegate);
       m_Delegate = nil;
+    }
+    if(m_Queue) {
+      // dispatch_queue_t is an os_object; ARC handles it, MRR does not.
+#if !__has_feature(objc_arc)
+      dispatch_release(m_Queue);
+#endif
+      m_Queue = nullptr;
     }
     std::lock_guard lock(m_Mutex);
     // m_Central is owned by CoreBluetooth, never by us.
