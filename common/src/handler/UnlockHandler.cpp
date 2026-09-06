@@ -50,6 +50,10 @@ UnlockResult UnlockHandler::GetResult(const std::string &authUser, const std::st
           udpBroadcaster = new UDPUnlockBroadcaster();
         auto port = device.pairingMethod == PairingMethod::UDP ? device.udpPort : device.udpManualPort;
         udpBroadcaster->AddDevice(device.id, port, device.pairingMethod == PairingMethod::MANUAL_UDP);
+        // The UDP methods still need the TCP server: the beacon only tells the
+        // phone where to connect, and it connects over TCP.
+        hasTCPServer = true;
+        continue;
       }
       case PairingMethod::CLOUD_TCP:
         hasTCPServer = true;

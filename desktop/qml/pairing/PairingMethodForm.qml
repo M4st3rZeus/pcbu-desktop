@@ -69,6 +69,31 @@ StepForm {
                 }
             }
 
+            // Bluetooth LE. Separate from the BLUETOOTH option above because
+            // that one is Classic RFCOMM, which an iPhone cannot use at all -
+            // iOS restricts Classic to MFi hardware, so a Classic inquiry
+            // never lists an iPhone. BLE is the only Bluetooth route to iOS.
+            //
+            // No device-select step here: the phone scans for this PC's GATT
+            // advertisement rather than the PC scanning for phones, so the
+            // flow goes straight to the QR code like the Wi-Fi methods.
+            ColumnLayout {
+                visible: PairingForm.GetData().pairingMethodType === 'AUTO'
+                enabled: PairingForm.HasBluetooth()
+                RadioButton {
+                    ButtonGroup.group: methodRadioGroup
+                    property string methodStr: 'BLE'
+                    text: QI18n.Get('pairing_method_ble_select')
+                    checked: PairingForm.GetData().pairingMethod === methodStr
+                }
+                Label {
+                    Layout.preferredWidth: 500
+                    Layout.leftMargin: 40
+                    text: QI18n.Get('pairing_method_ble_desc')
+                    wrapMode: Label.WordWrap
+                }
+            }
+
             ColumnLayout {
                 visible: PairingForm.GetData().pairingMethodType === 'MANUAL'
                 RadioButton {
